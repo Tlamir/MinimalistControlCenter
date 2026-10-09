@@ -1,5 +1,7 @@
 # Continuation — native v0.2, 9 October 2026
 
+Final checkpoint: source 88805bf pushed; public portable preview at https://github.com/Tlamir/MinimalistControlCenter/releases/tag/v0.2.0. Final release 59 library + 6 integration tests passed, strict Clippy and both PE audits passed. Native visible/hidden short benchmark results and exact binary hashes are in docs/BENCHMARKS.md. CI run37970664572 was still in progress at the time-bound wrap-up; check its outcome next.
+
 User wants a complete, genuinely lightweight OEM replacement, especially reliable fans. Latest instruction: finish within ten minutes or save an exact Markdown continuation. Safety and honest evidence outrank feature count. Full parity/extended thermal validation is UNFINISHED; do not call this checkpoint a completed replacement.
 
 Repo: https://github.com/Tlamir/MinimalistControlCenter
@@ -48,4 +50,3 @@ Before packaging: format, strict Clippy, debug/release tests, both PE audits. Re
 .tools/gh/bin/gh.exe authenticated Tlamir with workflow scope. Use per-command gh credential helper, no global credential changes. User authorized public push/checkpoints. No subagents requested.
 
 private/: OEM static decompilation, probes, raw results/audits, metadata. reports/local/: benchmarks. Never publish proprietary implementation, drivers, credentials or user inventories. Source notices regenerate via scripts/dependency-notices.py from locked cargo metadata. Include Rust runtime notices with binaries.
-
