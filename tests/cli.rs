@@ -1,0 +1,84 @@
+use std::{
+    process::Command,
+    time::{Duration, Instant},
+};
+
+fn binary() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mcc"))
+}
+
+#[test]
+fn actual_binary_reports_read_only_and_unknown_temperatures() {
+    let output = binary().args(["status", "--json"]).output().unwrap();
+    assert!(output.status.success());
+    let data: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(data["mode"], "read_only");
+    assert_eq!(data["hardware_control_available"], false);
+    for field in ["cpu_temperature_c", "gpu_temperature_c", "fan_rpm"] {
+        assert!(data["snapshot"][field]["value"].is_null());
+        assert!(data["snapshot"][field]["unavailable_reason"].is_string());
+    }
+    let text = String::from_utf8(output.stdout).unwrap();
+    for private_field in ["serial_number", "computer_name", "user_name", "mac_address"] {
+        assert!(!text.contains(private_field));
+    }
+}
+
+#[test]
+fn actual_binary_refuses_control_even_with_force() {
+    for args in [
+        vec!["fan", "0", "--force"],
+        vec!["write", "1873", "0"],
+        vec!["install"],
+        vec!["status", "--enable-control"],
+    ] {
+        let output = binary().args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn actual_watch_is_bounded_and_uses_null_first_cpu_sample() {
+    let started = Instant::now();
+    let output = binary()
+        .args(["watch", "--seconds", "1", "--interval-ms", "250", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let text = String::from_utf8(output.stdout).unwrap();
+    let rows: Vec<serde_json::Value> = text
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert!(rows[0]["system_cpu_percent"].is_null());
+    let summary = rows.last().unwrap();
+    assert_eq!(summary["type"], "watch_summary");
+    assert!((1..=4).contains(&summary["samples"].as_u64().unwrap()));
+    assert_eq!(rows.len() as u64, summary["samples"].as_u64().unwrap() + 1);
+    assert!(summary["wall_ms"].as_f64().unwrap() >= 1000.0);
+}
+
+#[test]
+fn simulation_cannot_be_mistaken_for_a_hardware_command() {
+    let output = binary().arg("simulate").output().unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("NO hardware commands"));
+    assert!(text.contains("emergency_cooling_required"));
+    assert!(text.contains("firmware_automatic_required"));
+}
+
+#[test]
+fn benchmark_explicitly_identifies_its_limited_scope() {
+    let output = binary()
+        .args(["bench", "--iterations", "1000"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let data: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(data["benchmark"], "offline_policy_only");
+    assert_eq!(data["rounds"], 7);
+    assert!(data["median_ns_per_evaluation"].as_f64().unwrap() > 0.0);
+}

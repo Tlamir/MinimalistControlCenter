@@ -1,0 +1,15 @@
+/target/
+/.tools/
+/private/
+/reports/local/
+*.pdb
+*.dmp
+*.etl
+*.bin
+*.dll
+*.sys
+*.exe
+*.zip
+.env*
+__pycache__/
+*.pyc

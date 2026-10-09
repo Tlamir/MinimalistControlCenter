@@ -1,0 +1,30 @@
+[package]
+name = "minimalist-control-center"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+description = "Read-only Windows diagnostics and offline thermal-policy verification for Tongfang laptops"
+license = "MIT"
+publish = false
+
+[lib]
+name = "mcc"
+
+[[bin]]
+name = "mcc"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
