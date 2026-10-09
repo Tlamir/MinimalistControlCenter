@@ -1,4 +1,14 @@
-# Protocol investigation — no commands enabled
+# Protocol investigation
+
+## Runtime update — v0.2
+
+Administrator probes and the native adapter successfully invoked reviewed reads. Return contains a word; the requested byte is the low eight bits, corroborated by OEM byte casts and [community transport](https://gitlab.com/siphomateke/tongfang-control/-/raw/master/tongfang_control/acpi.py). Tests pin actual values to this decoding.
+
+Initial mode byte1873=0. Support1 byte1893=224, support2 byte1894=131. Newer rule1922=0; newer defaults1929..1933 were zero. No low/fixed custom curves are exposed.
+
+Actual AUTO -> BOOST64 -> AUTO0 passed with five-second persistence, readback and owner-observed acceleration/return. The existing launcher was temporarily stopped/restored. No table or power-limit writes occurred. NVAPI read38°C; CPU/RPM candidates uncalibrated. Physical lighting/switch validation remains pending.
+
+See SAFETY.md for the current boundary and ../CONTINUATION.md for unfinished work. Findings below describe the earlier diagnostic stage, not the current executable.
 
 Investigated 9 October 2026. This document contains independently written observations, not vendor source. Installed `GamingCenter.exe` and `MySettingDLL.dll` were statically decompiled with ILSpy's decompiler library. Their hashes are recorded in PLAN.md. No vendor assembly was executed. Decompiler output remains in an ignored local directory.
 

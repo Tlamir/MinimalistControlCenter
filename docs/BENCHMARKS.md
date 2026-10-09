@@ -4,7 +4,7 @@ Verified local results for release executable SHA-256 `c4edf4c9834d8544a9c664a30
 
 - Warm `status --json`: 30 runs after 3 warmups; median **20.04 ms**, p95 **36.40 ms**, executable **573,952 bytes**.
 - Offline policy: 7 rounds of 1,000,000 evaluations; median **18.80 ns/evaluation**.
-- Ten-minute `watch`: 600 samples over **600,000.97 ms**; maximum sampled working set **5.65 MiB**, maximum private commit **0.84 MiB**, measured process CPU time **0 ms** at this sample resolution.
+- Ten-minute `watch`: 600 samples over **600,000.97 ms**; maximum sampled working set **5.39 MiB**, maximum private commit **0.84 MiB**, measured process CPU time **0 ms** at this sample resolution.
 
 These figures are diagnostic-only measurements. They do not establish fan performance, noise, cooling safety, game frame rates, or improvement over Monster Control Center. The watch process reports no thermal control activity.
 

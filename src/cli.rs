@@ -18,14 +18,35 @@ pub enum Command {
         iterations: u64,
     },
     Simulate,
+    Hardware {
+        action: HardwareAction,
+    },
+    Lighting {
+        config: crate::lighting::Lighting,
+    },
+    Power {
+        plan: crate::settings::PowerPlan,
+    },
+    Gpu,
 }
 
-pub const HELP: &str = "Minimalist Control Center 0.1 — READ ONLY\n\n\
-Usage:\n  mcc status [--json]\n  mcc schema [--json]\n  mcc watch [--seconds 10] [--interval-ms 1000] [--json]\n  mcc bench [--iterations 1000000]\n  mcc simulate\n\n\
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardwareAction {
+    Status,
+    Fan(crate::control::FanMode),
+    Switch(crate::control::Switch, bool),
+    PauseOem,
+    ResumeOem,
+}
+
+pub const HELP: &str = "Minimalist Control Center 0.2\n\n\
+Usage:\n  mcc status [--json]\n  mcc schema [--json]\n  mcc watch [--seconds 10] [--interval-ms 1000] [--json]\n  mcc bench [--iterations 1000000]\n  mcc simulate\n  mcc hardware status\n  mcc hardware fan-auto|fan-boost\n  mcc hardware key-lock-on|key-lock-off|usb-on|usb-off|light-bar-on|light-bar-off\n  mcc lighting off|solid|breathing|rainbow|wave|reactive BRIGHTNESS SPEED RRGGBB DIRECTION\n  mcc power balanced|saver|performance\n  mcc-ui.exe [--connect]\n\n\
 schema: opt-in WMI metadata only, bounded to 10 seconds. No vendor methods run.\n\
 watch: OS counters only; 1–3600 seconds, 250–60000 ms interval.\n\
 bench/simulate: synthetic in-memory policy only; never control real fans.\n\
-No control commands, EC access, driver installation or settings changes exist.\n";
+Hardware commands are explicit, fingerprint/capability/ownership gated.\n\
+Fan modes are firmware automatic or boost. No fixed speeds, raw writes, drivers or voltage changes.\n\
+Lighting brightness/speed: 0–4; direction: 1–4. Profiles never apply on startup.\n";
 
 pub fn parse(args: &[String]) -> Result<Command, String> {
     let Some(name) = args.first().map(String::as_str) else {
@@ -40,6 +61,72 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         );
     }
     match name {
+        "gpu" if args.len() == 1 => Ok(Command::Gpu),
+        "hardware" if args.len() == 2 => {
+            use crate::control::{FanMode, Switch};
+            let action = match args[1].as_str() {
+                "pause-oem" => HardwareAction::PauseOem,
+                "resume-oem" => HardwareAction::ResumeOem,
+                "status" => HardwareAction::Status,
+                "fan-auto" => HardwareAction::Fan(FanMode::Auto),
+                "fan-boost" => HardwareAction::Fan(FanMode::Boost),
+                "key-lock-on" => HardwareAction::Switch(Switch::WindowsKeyLock, true),
+                "key-lock-off" => HardwareAction::Switch(Switch::WindowsKeyLock, false),
+                "usb-on" => HardwareAction::Switch(Switch::UsbCharging, true),
+                "usb-off" => HardwareAction::Switch(Switch::UsbCharging, false),
+                "light-bar-on" => HardwareAction::Switch(Switch::LightBar, true),
+                "light-bar-off" => HardwareAction::Switch(Switch::LightBar, false),
+                _ => {
+                    return Err("Unknown typed hardware action; raw values are not accepted".into());
+                }
+            };
+            Ok(Command::Hardware { action })
+        }
+        "power" if args.len() == 2 => {
+            use crate::settings::PowerPlan;
+            let plan = match args[1].as_str() {
+                "balanced" => PowerPlan::Balanced,
+                "saver" => PowerPlan::PowerSaver,
+                "performance" => PowerPlan::HighPerformance,
+                _ => return Err("Choose balanced, saver or performance".into()),
+            };
+            Ok(Command::Power { plan })
+        }
+        "lighting" if args.len() == 6 => {
+            use crate::lighting::{Effect, Lighting};
+            let effect = match args[1].as_str() {
+                "off" => Effect::Off,
+                "solid" => Effect::Solid,
+                "breathing" => Effect::Breathing,
+                "rainbow" => Effect::Rainbow,
+                "wave" => Effect::Wave,
+                "reactive" => Effect::Reactive,
+                _ => return Err("Unknown keyboard effect".into()),
+            };
+            let n = |i: usize| {
+                args[i]
+                    .parse::<u8>()
+                    .map_err(|_| "Expected a bounded integer".to_owned())
+            };
+            let hex = &args[4];
+            if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("Color must be six hexadecimal digits, e.g. 46A0FF".into());
+            }
+            let rgb = [
+                u8::from_str_radix(&hex[0..2], 16).unwrap(),
+                u8::from_str_radix(&hex[2..4], 16).unwrap(),
+                u8::from_str_radix(&hex[4..6], 16).unwrap(),
+            ];
+            let config = Lighting {
+                effect,
+                brightness: n(2)?,
+                speed: n(3)?,
+                rgb,
+                direction: n(5)?,
+            };
+            crate::lighting::reports(&config)?;
+            Ok(Command::Lighting { config })
+        }
         "help" | "--help" | "-h" if args.len() == 1 => Ok(Command::Help),
         "--version" | "version" if args.len() == 1 => Ok(Command::Version),
         "status" | "schema" => {
@@ -180,5 +267,30 @@ mod tests {
                 json: true
             }
         );
+    }
+    #[test]
+    fn typed_controls_never_accept_raw_or_force_options() {
+        for s in [
+            "hardware write 1873 0",
+            "hardware fan-fixed",
+            "hardware fan-auto --force",
+            "power boost",
+            "lighting solid 5 0 00FF00 1",
+            "lighting solid 1 5 00FF00 1",
+            "lighting solid 1 2 nope 1",
+            "lighting solid 1 2 00FF00 0",
+        ] {
+            assert!(p(s).is_err(), "{s}");
+        }
+        assert_eq!(
+            p("hardware fan-auto").unwrap(),
+            Command::Hardware {
+                action: HardwareAction::Fan(crate::control::FanMode::Auto)
+            }
+        );
+        assert!(matches!(
+            p("lighting solid 4 2 00FF00 1"),
+            Ok(Command::Lighting { .. })
+        ));
     }
 }

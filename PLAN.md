@@ -2,7 +2,7 @@
 
 Prepared 9 October 2026. Target: the user's Monster Tulpar T5 V17.1 / reported Tongfang GK5CN6Z, Windows, Intel Core i7-8750H and NVIDIA GeForce GTX 1060.
 
-This is a research and implementation plan, not working control software. Investigation used file/metadata inspection, registry reads and online source review. No fan, power, driver, service or firmware settings were changed; no OEM executable or DLL was executed. Installed binaries are enough to begin interoperability research; original source would help but is not required for the first milestone.
+Current status: v0.2 includes a native GUI, real automatic/boost control and reversible OEM launcher handover. A short hardware test and audible response were confirmed. Full parity and extended thermal validation remain unfinished: see CONTINUATION.md and docs/SAFETY.md. The initial investigation below is historical; its unavailable/not-changed statements describe that earlier stage.
 
 ## Recommendation
 

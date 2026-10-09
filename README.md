@@ -1,38 +1,57 @@
 # Minimalist Control Center
 
-A small Rust diagnostic foundation for a future Tongfang/Monster laptop control center. Development target: Monster Tulpar T5 V17.1, reported GK5CN6Z, i7-8750H, GTX 1060.
+Native Rust + Win32 controls for **MONSTER TULPAR T5 V17.1 / BIOS N.1.06 / i7-8750H / GTX 1060**. No browser runtime, proprietary DLL, new driver, or continuously running fan algorithm.
 
-**v0.1 is read-only. It does not control fans or replace the OEM cooling software.** Fan, power and driver-write implementations are absent, not hidden behind a setting. Keep your existing cooling controller installed.
-
-## What works
-
-- Native Windows identity, memory, battery, AC state and CPU-usage counters.
-- Bounded monitoring with explicit unavailable sensor states and JSON output.
-- Opt-in discovery of Tongfang WMI class metadata, with a deadline and output limits.
-- An offline thermal-policy simulator with hysteresis, delayed decreases, immediate increases and invalid-sensor handling.
-- Automated fault tests, executable integration tests, binary import inspection and repeatable benchmarks.
-
-CPU/GPU temperature and fan RPM are intentionally unavailable until their sensor paths are validated. No GUI, background service, RGB control or hardware fan curves are shipped yet. Simulated cooling demand is not a hardware setting.
+**v0.2 controls real automatic/boost modes.** The target laptop passed a five-second AUTO → BOOST → AUTO test, and its owner confirmed the audible response and return. Full feature parity and extended thermal validation remain unfinished. No software can guarantee that hardware never fails.
 
 ## Run
 
-Windows x64; no administrator rights needed for normal diagnostics. Downloaded binaries are unsigned development builds and Windows may flag them accordingly.
+Keep mcc-ui.exe and mcc.exe together. Launch **mcc-ui.exe**. Startup reads OS counters and applies nothing.
+
+1. Exit Monster Kontrol Merkezi, including its tray icon.
+2. Click **Connect as admin** and accept UAC to read capabilities.
+3. Click **Take control** if the OEM launcher service is active. Its startup configuration stays unchanged. Close any OEM window it already launched.
+4. Select **Automatic fans**, **Cooling boost**, or a profile.
+5. Quiet uses Windows Power Saver with automatic fans. This reduces available performance; it is not an FPS optimization.
+
+Closing the window hides it to the tray and stops dashboard polling. Quit exits. Modes run in firmware without the app. To return to the original app, select Automatic fans, Restore OEM controller, then Quit.
+
+The physical turbo button is not periodically overridden. Refresh hardware to reread its mode. Its behavior with the OEM service paused still needs testing.
+
+## Features
+
+| Feature | Status |
+|---|---|
+| Native dashboard / tray | CPU usage, memory, battery, AC; 1 Hz visible updates, no hidden dashboard polling |
+| Automatic / boost fans | Real hardware test, mode readback, owner-observed response and return |
+| OEM handover | Existing exact-path user-mode launcher temporarily stopped and restored in the test |
+| Power plans / profiles | Standard Windows plans, three presets, saved lighting; strict bounded JSON, no startup application |
+| Keyboard | Off, solid, breathing, rainbow, wave; brightness, speed, direction, RGB; finite HID transfers, no flash-save or host animation; physical validation pending |
+| Win-key lock / USB charging / light bar | Capability-gated desired-state commands with readback; physical switch validation pending |
+| Display / GPU | Screen off, Windows per-app GPU preference link, opt-in NVAPI temperature; actual read returned 38°C |
+| CPU temperature / fan RPM / custom curves | Uncalibrated; no invented readings or unsafe low-speed curve |
+| Reactive / per-key editor / OSD / display color presets | Remaining parity work |
+
+The GUI runs hardware helpers outside its UI thread with five-second deadlines and bounded output. A timed-out write may already have taken effect: reconnect and check the mode. Keep the original app installed for recovery. Builds are unsigned Windows x64 development builds.
+
+## CLI
 
 ```powershell
-.\mcc.exe status
-.\mcc.exe status --json
-.\mcc.exe watch --seconds 10 --interval-ms 1000
-.\mcc.exe schema --json
-.\mcc.exe simulate
+.\mcc.exe status --json                 # OS counters only
+.\mcc.exe hardware status              # explicit firmware reads
+.\mcc.exe hardware fan-auto
+.\mcc.exe hardware fan-boost
+.\mcc.exe gpu                          # may wake the discrete GPU
+.\mcc.exe power saver
+.\mcc.exe lighting rainbow 3 2 46A0FF 1
+.\mcc.exe watch --seconds 10 --json
 ```
 
-`status` reads only selected registry strings and documented OS counters. `watch` samples OS counters only and exits automatically. `schema` uses the Windows system copy of PowerShell once to inspect class definitions; it never invokes the listed vendor methods. If access is unavailable, it reports that rather than attempting to alter permissions.
+No raw-address, fan-off, fixed-speed, force, driver-install or firmware-flash entry point exists. The simulator's fictional policy never reaches hardware.
 
-There are no `fan`, `write`, `boost`, `install` or `--force` commands. No setting enables them.
+## Build / verify
 
-## Build and verify
-
-Use stable Rust (minimum source language version 1.87; the lockfile and CI use current stable). Standard Windows MSVC builds need the Visual Studio C++ build tools. A pure Rust GNU/LLVM build can use the bundled linker and `rust-mingw` component; `.cargo/config.toml` supplies that target's settings.
+Stable Rust; normal Windows/MSVC builds need Visual Studio C++ build tools. Linux tests the portable core and mocks, without a hardware backend.
 
 ```powershell
 cargo fmt --all -- --check
@@ -41,23 +60,14 @@ cargo test --all-targets --locked
 cargo test --all-targets --release --locked
 cargo build --release --locked
 python scripts/audit_binary.py target/release/mcc.exe
+python scripts/audit_binary.py target/release/mcc-ui.exe
 ```
 
-Linux CI runs parsing, policy, process and integration tests with Windows counters marked unavailable. Linux is not a supported hardware backend.
+Local SDK-less GNU/LLVM builds use ignored project-local tools and generated OS import metadata: scripts/local_import_libraries.py, then scripts/build-local.ps1 -Release -Test. No global PATH changes.
 
-## Measure
+Tests include actual native UI responsiveness during a delayed worker, subprocess hangs/overflow, malformed settings, missing/stale synthetic sensors, payload encoding, actual probe word decoding, readback/recovery failures, idempotence and unrelated-bit preservation.
 
-```powershell
-.\target\release\mcc.exe bench --iterations 1000000
-.\scripts\benchmark.ps1 -Seconds 600
-```
+See [safety](docs/SAFETY.md), [protocol evidence](docs/PROTOCOL.md), [benchmarks](docs/BENCHMARKS.md), and [unfinished work / exact continuation](CONTINUATION.md). No million-fold speedup, zero impact, cooling improvement or FPS gain is claimed without measurements.
 
-The benchmark script records 30 warm process launches after three discarded warmups, seven offline-policy rounds and a low-rate monitoring session. Reports default to ignored `reports/local/`. The policy loop makes no hardware calls. Read [benchmark results and limitations](docs/BENCHMARKS.md) before interpreting the numbers. No OEM speedup or FPS improvement is claimed.
+Independent of Monster/Tongfang. Original implementation MIT. OEM code, drivers, tools and raw reports are not redistributed; dependency notices accompany binaries.
 
-## Safety and development
-
-[Safety boundary](docs/SAFETY.md) describes what the current executable can and cannot do. [Protocol findings](docs/PROTOCOL.md) explain why static register discovery is insufficient to enable fan control. [The implementation plan](PLAN.md) records the longer-term scope and hardware validation gates.
-
-The first hardware investigation confirmed that the local WMI metadata contains `AcpiTest_MULong.GetSetULong`, with `Data: UInt64` and `Return: UInt32`. **Metadata presence does not establish safe fan control.** Static inspection also found model-dependent fan scaling and power-limit side effects. No EC transactions have been attempted by this project.
-
-OEM binaries, decompiled code, downloaded tools and raw local reports are excluded from the repository. This project is independent of Monster and Tongfang. MIT-licensed original implementation; vendor software is not redistributed.

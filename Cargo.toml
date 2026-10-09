@@ -1,9 +1,9 @@
 [package]
 name = "minimalist-control-center"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.87"
-description = "Read-only Windows diagnostics and offline thermal-policy verification for Tongfang laptops"
+description = "Native Windows control center for verified Tongfang hardware"
 license = "MIT"
 publish = false
 
@@ -14,9 +14,18 @@ name = "mcc"
 name = "mcc"
 path = "src/main.rs"
 
+[[bin]]
+name = "mcc-ui"
+path = "src/ui_main.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+wmi = "0.18.4"
+hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Controls", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Services", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_HumanInterfaceDevice", "Win32_Security"] }
 
 [profile.release]
 lto = true

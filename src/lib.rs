@@ -1,9 +1,20 @@
-//! Read-only system diagnostics. No EC access, vendor method invocation or control backend.
+//! Native control center. Diagnostics are read-only; controls use an explicit typed backend.
 pub mod cli;
+pub mod control;
+#[cfg(windows)]
+pub mod desktop;
+#[cfg(windows)]
+pub mod gpu;
+#[cfg(windows)]
+pub mod hardware;
+pub mod lighting;
+#[cfg(windows)]
+mod oem;
 pub mod platform;
 pub mod policy;
 pub mod process;
 pub mod schema;
+pub mod settings;
 
 use serde::Serialize;
 use std::time::Duration;
@@ -83,9 +94,9 @@ pub fn report() -> Report {
         identity: platform::identity(),
         snapshot: platform::snapshot(),
         limitations: [
-            "No EC reads/writes, fan commands, driver installation or power-setting changes are implemented.",
-            "CPU/GPU temperature and fan RPM are unavailable until their protocol is verified.",
-            "WMI schema discovery is opt-in and does not prove hardware control works.",
+            "This status command reads OS counters only. Explicit hardware commands are separate.",
+            "CPU temperature and fan RPM require independently verified telemetry; missing values remain unknown.",
+            "Hardware controls require the supported fingerprint, capabilities, administrator access and no competing OEM application.",
         ],
     }
 }

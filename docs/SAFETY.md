@@ -1,30 +1,35 @@
-# Safety boundary for v0.1
+# Safety boundary — v0.2
 
-This release is a diagnostic foundation, not a replacement fan controller. Keep the OEM/firmware cooling system in place. We do not claim it is impossible for software or hardware to fail.
+The backend permits firmware automatic/boost, three convenience switches, supported keyboard HID effects, and documented Windows controls. It excludes fixed speeds, fan-off, arbitrary EC writes, custom low-speed tables, power-limit/voltage changes, firmware flashing, driver installation, registry writes and startup configuration changes.
 
-The executable can query a small allowlist of Windows registry strings and documented OS counters. It can optionally launch the Windows system copy of PowerShell with an embedded, fixed metadata-only WMI script. It can print diagnostics and run an offline synthetic policy calculation.
+No software guarantees a PC can never fail. Evidence covers one short physical cooling test on one BIOS, not all workloads or power transitions. Keep the OEM app installed.
 
-It does not implement EC access, invoke vendor WMI methods, load OEM DLLs, install a driver/service, change fan speed, change power limits, edit startup settings or modify the registry. There is no `--force` or hidden control switch. It does not require administrator privileges for normal operation. In restricted environments, discovery can report unavailable/access denied instead of requesting elevation.
+## Guards
 
-## Tests and evidence
+- Exact model, BIOS, CPU and GPU fingerprint; reviewed ACPI instance only.
+- Separate read/write encoding; verified low-byte decoding of word returns. Invalid capability data refuses writes.
+- Named transaction mutex. Running OEM controllers/services block hardware writes; external software need not honor this mutex.
+- Fan changes check capability, idempotence and readback. Failure attempts auto once and reports its readback. Broken WMI/firmware can prevent recovery.
+- Switches read desired/current state, preserve unrelated bits, check readback and avoid repeated failed toggles.
+- Handover only stops/starts the existing exact-path GamingCenter user-mode launcher, in automatic fan mode. No driver service or startup configuration changes. Exit its already-launched GUI separately.
+- UI helpers have five-second deadlines and 64 KiB per-stream output limits. Killing a helper cannot undo an already-submitted transaction. Manual CLI operations have no supervising process timeout.
+- Profiles validate bounded JSON before use, report partial application, and never apply on startup.
 
-- CLI integration tests execute the actual built program and verify control requests fail before diagnostics begin.
-- Sensor unavailable values remain JSON null with a reason, never a fabricated zero.
-- Watch intervals and duration are bounded; missed ticks do not produce polling bursts.
-- WMI subprocess output is capped at 64 KiB per stream and the operation has a 10-second deadline. Failed parsing, wrong scope, unexpected fields and malformed identifiers are rejected.
-- Child-process tests cover hangs, oversized stdout/stderr and nonzero exits.
-- Synthetic policy tests cover missing/stale/future/non-finite readings, clock rollback, CPU/GPU demand, rapid heating, delayed cooling, oscillation, integer boundaries and 100,000 deterministic fault samples.
-- Windows binary import inspection checks for known hardware/registry/service write APIs and vendor libraries. This catches regressions but does not prove all possible side effects are absent; review source and dependencies too.
-- CI runs formatting, strict Clippy, debug/release tests and a Windows executable import audit.
+## Cooling and physical button
 
-The simulator's emergency temperatures and curves are fictional test inputs. Its unitless demand is not a PWM value and must never be connected directly to hardware. A simulated `firmware_automatic_required` result only describes a recommendation; it does not restore real firmware control.
+Automatic and boost are firmware modes. There is no periodic forced speed or host temperature loop. Exit/crash leaves the requested firmware mode; it does not reset hardware. Physical turbo-button routing with OEM paused, sleep/resume and cold boot still need validation.
 
-## Measurement limits
+The offline simulator is disconnected. Its illustrative temperatures and unitless demand are not approved settings.
 
-Policy microbenchmarks establish computation cost only. OS-counter monitoring measures this diagnostic executable, not a future service, graphical interface or WMI provider overhead. None of these tests establishes cooling effectiveness, game performance, noise improvement, crash-safe hardware behavior or a speedup over the OEM application.
+## Actual evidence
 
-## Public repository hygiene
+Administrator firmware reads succeeded. Capability flags advertise boost, Win-key lock, USB charging and light bar; initial mode was auto. Newer fan-table defaults read zero and cannot establish safe curves.
 
-OEM binaries, native drivers, decompiled implementation, downloaded tools and local diagnostic reports are ignored. Public benchmark summaries contain only reviewed aggregate measurements. Diagnostics omit usernames, hostname, serial numbers, MAC addresses and user file paths by design. Review reports before sharing them.
+First fan test refused writes while the OEM service ran. Later test paused it, set BOOST, checked persistence for five seconds, restored AUTO with readback, and restarted the service. The owner confirmed audible acceleration/return. No power limit or table changed.
 
-Future releases that add control need a new safety review and the hardware evidence in PROTOCOL.md. This release's boundary must not be used to justify later hardware writes.
+NVAPI read GPU temperature 38°C. CPU/RPM candidates remain uncalibrated; plausible numbers are insufficient proof. Physical lighting/switch behavior, sustained thermals/noise, AC changes, resume, reboot and physical turbo interaction remain pending.
+
+PE audit excludes known driver-installation/configuration, raw EC library, remote-memory and power-limit APIs. HID, standard power-plan selection and fixed OEM launcher handover are expected. This is defense in depth, not proof of every side effect.
+
+OEM binaries/decompilation, tools, credentials and raw local reports are excluded from publication. Diagnostics omit serial numbers, usernames, hostname and MAC addresses.
+

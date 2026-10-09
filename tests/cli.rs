@@ -46,7 +46,8 @@ fn actual_watch_is_bounded_and_uses_null_first_cpu_sample() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // Windows may scan a newly linked executable before its own bounded watch clock starts.
+    assert!(started.elapsed() < Duration::from_secs(30));
     let text = String::from_utf8(output.stdout).unwrap();
     let rows: Vec<serde_json::Value> = text
         .lines()
@@ -58,6 +59,7 @@ fn actual_watch_is_bounded_and_uses_null_first_cpu_sample() {
     assert!((1..=4).contains(&summary["samples"].as_u64().unwrap()));
     assert_eq!(rows.len() as u64, summary["samples"].as_u64().unwrap() + 1);
     assert!(summary["wall_ms"].as_f64().unwrap() >= 1000.0);
+    assert!(summary["wall_ms"].as_f64().unwrap() < 5000.0);
 }
 
 #[test]
@@ -81,4 +83,29 @@ fn benchmark_explicitly_identifies_its_limited_scope() {
     assert_eq!(data["benchmark"], "offline_policy_only");
     assert_eq!(data["rounds"], 7);
     assert!(data["median_ns_per_evaluation"].as_f64().unwrap() > 0.0);
+}
+
+#[cfg(windows)]
+#[test]
+fn actual_native_ui_remains_responsive_during_a_slow_worker() {
+    let path = std::env::temp_dir().join(format!("mcc-ui-test-{}.json", std::process::id()));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mcc-ui"))
+        .args(["--self-test", path.to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("Native UI failed to exit after its bounded self-test");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let _ = std::fs::remove_file(path);
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["hardware_accessed"], false);
+    assert_eq!(report["worker_responsive"], true);
+    assert!(report["ticks_during_worker_delay"].as_u64().unwrap() >= 3);
 }

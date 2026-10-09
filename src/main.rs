@@ -28,8 +28,46 @@ fn label<T: std::fmt::Display>(v: &mcc::Reading<T>) -> String {
 
 fn execute(command: Command) -> Result<(), String> {
     match command {
+        Command::Gpu => {
+            #[cfg(windows)]
+            {
+                match mcc::gpu::temperature() {
+                    Ok(c) => pretty(&json!({"ok":true,"gpu_temperature_c":c})),
+                    Err(e) => pretty(&json!({"ok":false,"error":e})),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                Err("NVIDIA telemetry requires Windows".into())
+            }
+        }
         Command::Help => output(cli::HELP),
-        Command::Version => output(concat!("mcc ", env!("CARGO_PKG_VERSION"), " (read-only)")),
+        Command::Version => output(concat!("mcc ", env!("CARGO_PKG_VERSION"))),
+        Command::Hardware { action } => hardware(action),
+        Command::Lighting { config } => {
+            #[cfg(windows)]
+            {
+                let result = mcc::hardware::keyboard(&config);
+                pretty(&json!({"ok":result.is_ok(),"error":result.err()}))
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = config;
+                Err("Hardware controls require Windows".into())
+            }
+        }
+        Command::Power { plan } => {
+            #[cfg(windows)]
+            {
+                let result = mcc::desktop::power(plan);
+                pretty(&json!({"ok":result.is_ok(),"error":result.err()}))
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = plan;
+                Err("Power controls require Windows".into())
+            }
+        }
         Command::Status { json } => {
             let r = mcc::report();
             if json {
@@ -102,6 +140,36 @@ fn execute(command: Command) -> Result<(), String> {
             }
             pretty(&json!({"missing_sensor_decision":simulator.evaluate(11_000,None,None)}))
         }
+    }
+}
+
+fn hardware(action: cli::HardwareAction) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use cli::HardwareAction;
+        match action {
+            HardwareAction::PauseOem | HardwareAction::ResumeOem => {
+                let r = mcc::hardware::handover(matches!(action, HardwareAction::ResumeOem));
+                pretty(&json!({"ok":r.is_ok(),"error":r.err()}))
+            }
+            HardwareAction::Status => match mcc::hardware::status() {
+                Ok(s) => pretty(&json!({"ok":true,"status":s})),
+                Err(e) => pretty(&json!({"ok":false,"error":e})),
+            },
+            HardwareAction::Fan(mode) => {
+                let r = mcc::hardware::fan(mode);
+                pretty(&json!({"ok":r.is_ok(),"error":r.err()}))
+            }
+            HardwareAction::Switch(s, on) => {
+                let r = mcc::hardware::switch(s, on);
+                pretty(&json!({"ok":r.is_ok(),"error":r.err()}))
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = action;
+        Err("Hardware controls require Windows".into())
     }
 }
 

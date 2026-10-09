@@ -1,4 +1,4 @@
-name: Read-only diagnostics CI
+name: Native control center CI
 on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
@@ -19,7 +19,9 @@ jobs:
       - run: cargo build --release --locked
       - name: Audit Windows executable imports
         if: runner.os == 'Windows'
-        run: python scripts/audit_binary.py target/release/mcc.exe
+        run: |
+          python scripts/audit_binary.py target/release/mcc.exe
+          python scripts/audit_binary.py target/release/mcc-ui.exe
       - name: Assert diagnostics and reject controls
         if: runner.os == 'Windows'
         shell: pwsh
@@ -32,6 +34,10 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: runner.os == 'Windows'
         with:
-          name: mcc-windows-x64-read-only
-          path: target/release/mcc.exe
+          name: mcc-windows-x64
+          path: |
+            target/release/mcc.exe
+            target/release/mcc-ui.exe
+            LICENSE
+            THIRD_PARTY_NOTICES.md
           retention-days: 14

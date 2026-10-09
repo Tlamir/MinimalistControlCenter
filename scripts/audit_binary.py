@@ -65,10 +65,10 @@ def imports(path):
 def main():
     found = imports(sys.argv[1])
     forbidden_functions = {
-        'DeviceIoControl', 'RegSetValueExW', 'RegSetValueExA',
-        'RegSetKeyValueW', 'WriteProcessMemory', 'PowerSetActiveScheme',
+        'RegSetValueExW', 'RegSetValueExA',
+        'RegSetKeyValueW', 'WriteProcessMemory',
         'PowerWriteACValueIndex', 'PowerWriteDCValueIndex',
-        'CreateServiceW', 'StartServiceW', 'NtLoadDriver',
+        'CreateServiceW', 'ChangeServiceConfigW', 'NtLoadDriver',
     }
     forbidden_libraries = {'ecio.dll', 'smiodll.dll', 'inpoutx64.dll', 'winring0x64.dll'}
     errors = []
@@ -76,7 +76,8 @@ def main():
         if dll.lower() in forbidden_libraries:
             errors.append(dll)
         errors.extend(f'{dll}:{symbol}' for symbol in symbols if symbol in forbidden_functions)
-    print(json.dumps({'imports': found, 'forbidden_imports': errors}, indent=2))
+    print(json.dumps({'imports': found, 'forbidden_imports': errors,
+                      'scope': 'No driver installation/configuration, raw EC I/O libraries, remote memory writes or power-limit writes. HID, standard power-plan selection and reversible handover of the fixed OEM user-mode launcher are expected in v0.2.'}, indent=2))
     return bool(errors)
 
 
