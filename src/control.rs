@@ -82,6 +82,29 @@ pub fn supported_identity(
         && gpu.iter().any(|s| s == "NVIDIA GeForce GTX 1060")
 }
 
+/// Missing OEM software is a valid standalone installation. Ambiguous/changed
+/// services are never controlled, and restoring an absent service is an error.
+pub(crate) fn reviewed_launcher(paths: &[&str], restoring: bool) -> Result<bool, String> {
+    if paths.is_empty() {
+        return if restoring {
+            Err("The original controller is not installed".into())
+        } else {
+            Ok(false)
+        };
+    }
+    if paths.len() != 1
+        || !paths[0].trim_matches('"').eq_ignore_ascii_case(
+            "C:\\Program Files\\OEM\\Monster Kontrol Merkezi\\LaunchServGM.exe",
+        )
+    {
+        return Err(
+            "Original controller service differs from the reviewed launcher; handover refused"
+                .into(),
+        );
+    }
+    Ok(true)
+}
+
 pub(crate) fn capabilities(ec: &mut impl Ec) -> Result<Capabilities, String> {
     let s1 = ec.read(SUPPORT1)?;
     let s2 = ec.read(SUPPORT2)?;
@@ -149,20 +172,43 @@ pub(crate) fn set_fan(ec: &mut impl Ec, mode: FanMode) -> Result<(), String> {
 
 pub(crate) fn set_switch(ec: &mut impl Ec, switch: Switch, enabled: bool) -> Result<(), String> {
     let caps = capabilities(ec)?;
-    let (supported, current, mask) = match switch {
-        Switch::WindowsKeyLock => (caps.windows_key_lock, caps.windows_key_locked, 1),
-        Switch::UsbCharging => (caps.usb_charging, caps.usb_charging_enabled, 16),
-        Switch::LightBar => (caps.light_bar, caps.light_bar_enabled, 2),
+    let (supported, mask) = match switch {
+        Switch::WindowsKeyLock => (caps.windows_key_lock, 1),
+        Switch::UsbCharging => (caps.usb_charging, 16),
+        Switch::LightBar => (caps.light_bar, 2),
     };
     if !supported {
         return Err("This firmware does not advertise that switch".into());
     }
-    if current == enabled {
-        return Ok(());
+    // Toggle bits are requests, not persistent settings. Wait for the preceding
+    // request to be consumed before submitting another (e.g. light bar ON -> OFF).
+    // Never replay a pending pulse, including one belonging to another switch.
+    let mut trigger = ec.read(TRIGGER)?;
+    for _ in 0..10 {
+        if trigger & 3 == 0 || trigger == 255 {
+            break;
+        }
+        ec.settle();
+        trigger = ec.read(TRIGGER)?;
     }
-    let trigger = ec.read(TRIGGER)?;
     if trigger == 255 {
         return Err("Invalid trigger byte; no write performed".into());
+    }
+    if trigger & 3 != 0 {
+        return Err("Previous switch request is still pending; no write performed".into());
+    }
+    // Re-read after pending requests were consumed. An earlier timed-out request
+    // may already have reached the desired state; another pulse would undo it.
+    let state = if switch == Switch::UsbCharging {
+        trigger
+    } else {
+        ec.read(STATUS)?
+    };
+    if state == 255 {
+        return Err("Invalid switch state; no write performed".into());
+    }
+    if (state & mask != 0) == enabled {
+        return Ok(());
     }
     let value = if switch == Switch::UsbCharging && !enabled {
         trigger & !mask
@@ -170,17 +216,23 @@ pub(crate) fn set_switch(ec: &mut impl Ec, switch: Switch, enabled: bool) -> Res
         trigger | mask
     };
     ec.write(TRIGGER, value)?;
-    ec.settle();
-    let after = capabilities(ec)?;
-    let current = match switch {
-        Switch::WindowsKeyLock => after.windows_key_locked,
-        Switch::UsbCharging => after.usb_charging_enabled,
-        Switch::LightBar => after.light_bar_enabled,
-    };
-    if current != enabled {
-        return Err("Switch readback mismatch; no repeated toggle attempted".into());
+    // Firmware can acknowledge asynchronously. Poll reads only: a second toggle
+    // would undo a successful first one whose acknowledgement arrived late.
+    for _ in 0..10 {
+        ec.settle();
+        let value = ec.read(if switch == Switch::UsbCharging {
+            TRIGGER
+        } else {
+            STATUS
+        })?;
+        if value == 255 {
+            return Err("Invalid switch readback; no repeated toggle attempted".into());
+        }
+        if (value & mask != 0) == enabled {
+            return Ok(());
+        }
     }
-    Ok(())
+    Err("Switch acknowledgement timed out; no repeated toggle attempted".into())
 }
 
 #[cfg(test)]
@@ -195,11 +247,23 @@ mod tests {
         assert!(decode_ec_byte(65536).is_err());
         assert!(decode_ec_byte(u32::MAX).is_err());
     }
+    #[test]
+    fn standalone_installation_does_not_require_original_files_or_service() {
+        assert!(!reviewed_launcher(&[], false).unwrap());
+        assert!(reviewed_launcher(&[], true).is_err());
+        let exact = "C:\\Program Files\\OEM\\Monster Kontrol Merkezi\\LaunchServGM.exe";
+        assert!(reviewed_launcher(&[exact], false).unwrap());
+        assert!(reviewed_launcher(&[exact, exact], false).is_err());
+        assert!(reviewed_launcher(&["C:\\unexpected.exe"], false).is_err());
+        assert!(reviewed_launcher(&[""], false).is_err());
+    }
     struct Mock {
         values: BTreeMap<u16, u8>,
         writes: Vec<(u16, u8)>,
         fail: bool,
         ignore: bool,
+        delay: usize,
+        pending: Option<u8>,
     }
     impl Mock {
         fn new() -> Self {
@@ -216,6 +280,8 @@ mod tests {
                 writes: vec![],
                 fail: false,
                 ignore: false,
+                delay: 0,
+                pending: None,
             }
         }
     }
@@ -232,11 +298,20 @@ mod tests {
             if !self.ignore {
                 self.values.insert(a, v);
                 if a == TRIGGER {
-                    let old = self.values[&STATUS];
-                    self.values.insert(STATUS, old ^ (v & 3));
+                    self.pending = Some(v & 3);
                 }
             }
             Ok(())
+        }
+        fn settle(&mut self) {
+            if self.delay > 0 {
+                self.delay -= 1;
+                return;
+            }
+            if let Some(pulse) = self.pending.take() {
+                self.values.insert(STATUS, self.values[&STATUS] ^ pulse);
+                self.values.insert(TRIGGER, self.values[&TRIGGER] & !3);
+            }
         }
     }
     #[test]
@@ -340,5 +415,53 @@ mod tests {
         m.ignore = true;
         assert!(set_switch(&mut m, Switch::WindowsKeyLock, true).is_err());
         assert_eq!(m.writes.len(), 1);
+    }
+    #[test]
+    fn light_bar_on_then_off_waits_for_late_acknowledgement() {
+        let mut m = Mock::new();
+        m.delay = 3;
+        set_switch(&mut m, Switch::LightBar, true).unwrap();
+        m.delay = 4;
+        set_switch(&mut m, Switch::LightBar, false).unwrap();
+        assert_eq!(m.writes, [(TRIGGER, 2), (TRIGGER, 2)]);
+        assert_eq!(m.values[&STATUS] & 2, 0);
+    }
+    #[test]
+    fn pending_pulse_is_never_reissued_or_overwritten() {
+        let mut m = Mock::new();
+        m.values.insert(TRIGGER, 1);
+        assert!(set_switch(&mut m, Switch::LightBar, true).is_err());
+        assert!(m.writes.is_empty());
+        m.values.insert(TRIGGER, 2);
+        assert!(set_switch(&mut m, Switch::UsbCharging, true).is_err());
+        assert!(m.writes.is_empty());
+    }
+    #[test]
+    fn delayed_timeout_submits_exactly_one_pulse() {
+        let mut m = Mock::new();
+        m.delay = 50;
+        assert!(set_switch(&mut m, Switch::LightBar, true).is_err());
+        assert_eq!(m.writes, [(TRIGGER, 2)]);
+    }
+    #[test]
+    fn late_success_of_previous_request_is_not_toggled_back() {
+        let mut m = Mock::new();
+        m.values.insert(TRIGGER, 2);
+        m.pending = Some(2);
+        m.delay = 3;
+        set_switch(&mut m, Switch::LightBar, true).unwrap();
+        assert_eq!(m.values[&STATUS] & 2, 2);
+        assert!(m.writes.is_empty());
+    }
+    #[test]
+    fn pending_request_must_be_consumed_even_if_old_state_matches_target() {
+        let mut m = Mock::new();
+        m.values.insert(TRIGGER, 2);
+        m.values.insert(STATUS, 2);
+        m.pending = Some(2);
+        m.delay = 2;
+        set_switch(&mut m, Switch::LightBar, true).unwrap();
+        assert_eq!(m.writes, [(TRIGGER, 2)]);
+        assert_eq!(m.values[&STATUS] & 2, 2);
     }
 }

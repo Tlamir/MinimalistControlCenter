@@ -50,7 +50,11 @@ impl NativeEc {
             .map_err(|e| format!("WMI connection: {e}. Administrator access may be required"))?;
         let rows: Vec<Instance> = wmi
             .raw_query("SELECT __Path, InstanceName FROM AcpiTest_MULong")
-            .map_err(|e| format!("ACPI instance: {e}. Use Connect as administrator"))?;
+            .map_err(|e| {
+                format!(
+                    "Cannot read laptop firmware: {e}. Enable controls with administrator access"
+                )
+            })?;
         let mut rows = rows.into_iter().filter(|r| r.name == "ACPI\\PNP0C14\\1_1");
         let row = rows.next().ok_or("Reviewed ACPI instance not present")?;
         if rows.next().is_some() {
@@ -273,22 +277,18 @@ pub fn handover(start_oem: bool) -> Result<(), String> {
     let mut ec = NativeEc::connect()?;
     let caps = control::capabilities(&mut ec)?;
     if caps.fan_mode_raw != 0 {
-        return Err("Select automatic fan mode before handing control between applications".into());
+        return Err("Set automatic cooling in the original controller, exit its tray icon, then enable controls here".into());
     }
     let c = WMIConnection::with_namespace_path("root\\CIMV2").map_err(|e| e.to_string())?;
     let services: Vec<Service> = c
         .raw_query("SELECT Name, State, PathName FROM Win32_Service WHERE Name='GamingCenter'")
         .map_err(|e| e.to_string())?;
-    if services.len() != 1
-        || !services[0].path.as_deref().is_some_and(|p| {
-            p.trim_matches('"').eq_ignore_ascii_case(
-                "C:\\Program Files\\OEM\\Monster Kontrol Merkezi\\LaunchServGM.exe",
-            )
-        })
-    {
-        return Err(
-            "OEM service path differs from the locally reviewed launcher; handover refused".into(),
-        );
+    let paths: Vec<&str> = services
+        .iter()
+        .map(|s| s.path.as_deref().unwrap_or(""))
+        .collect();
+    if !control::reviewed_launcher(&paths, start_oem)? {
+        return Ok(());
     }
     crate::oem::change(start_oem)
 }

@@ -1,4 +1,4 @@
-# Safety boundary — v0.2
+# Safety boundary — v0.3
 
 The backend permits firmware automatic/boost, three convenience switches, supported keyboard HID effects, and documented Windows controls. It excludes fixed speeds, fan-off, arbitrary EC writes, custom low-speed tables, power-limit/voltage changes, firmware flashing, driver installation, registry writes and startup configuration changes.
 
@@ -10,9 +10,10 @@ No software guarantees a PC can never fail. Evidence covers one short physical c
 - Separate read/write encoding; verified low-byte decoding of word returns. Invalid capability data refuses writes.
 - Named transaction mutex. Running OEM controllers/services block hardware writes; external software need not honor this mutex.
 - Fan changes check capability, idempotence and readback. Failure attempts auto once and reports its readback. Broken WMI/firmware can prevent recovery.
-- Switches read desired/current state, preserve unrelated bits, check readback and avoid repeated failed toggles.
+- Switches wait for preceding toggle pulses, re-read current state after the wait, preserve unrelated bits, submit one pulse and poll acknowledgement. A late successful request is never blindly toggled back. Pending pulses that do not clear refuse writes.
 - Handover only stops/starts the existing exact-path GamingCenter user-mode launcher, in automatic fan mode. No driver service or startup configuration changes. Exit its already-launched GUI separately.
 - UI helpers have five-second deadlines and 64 KiB per-stream output limits. Killing a helper cannot undo an already-submitted transaction. Manual CLI operations have no supervising process timeout.
+- After a hardware action, including failure, the UI refreshes status. Fresh readback and ownership allow further actions; unavailable status revokes access. Recovery never replays the action. Missing OEM software needs no handover service; changed/ambiguous service paths are refused.
 - Profiles validate bounded JSON before use, report partial application, and never apply on startup.
 
 ## Cooling and physical button
@@ -32,4 +33,3 @@ NVAPI read GPU temperature 38°C. CPU/RPM candidates remain uncalibrated; plausi
 PE audit excludes known driver-installation/configuration, raw EC library, remote-memory and power-limit APIs. HID, standard power-plan selection and fixed OEM launcher handover are expected. This is defense in depth, not proof of every side effect.
 
 OEM binaries/decompilation, tools, credentials and raw local reports are excluded from publication. Diagnostics omit serial numbers, usernames, hostname and MAC addresses.
-

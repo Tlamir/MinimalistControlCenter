@@ -107,5 +107,6 @@ fn actual_native_ui_remains_responsive_during_a_slow_worker() {
     assert_eq!(report["ok"], true);
     assert_eq!(report["hardware_accessed"], false);
     assert_eq!(report["worker_responsive"], true);
+    assert_eq!(report["pages_isolated_and_startup_writes_disabled"], true);
     assert!(report["ticks_during_worker_delay"].as_u64().unwrap() >= 3);
 }

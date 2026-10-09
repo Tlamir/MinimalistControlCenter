@@ -14,6 +14,7 @@ pub mod platform;
 pub mod policy;
 pub mod process;
 pub mod schema;
+pub mod session;
 pub mod settings;
 
 use serde::Serialize;

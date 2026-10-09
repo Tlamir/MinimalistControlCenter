@@ -3,7 +3,8 @@ use crate::settings::PowerPlan;
 use std::ptr;
 use windows_sys::{
     Win32::{
-        System::Power::PowerSetActiveScheme,
+        Foundation::LocalFree,
+        System::Power::{PowerGetActiveScheme, PowerSetActiveScheme},
         UI::WindowsAndMessaging::{
             HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SYSCOMMAND,
         },
@@ -11,12 +12,40 @@ use windows_sys::{
     core::GUID,
 };
 
+pub fn active_power() -> Option<PowerPlan> {
+    let mut id = ptr::null_mut();
+    // SAFETY: API allocates a GUID on success; copy its value and free it exactly once.
+    unsafe {
+        if PowerGetActiveScheme(ptr::null_mut(), &mut id) != 0 || id.is_null() {
+            return None;
+        }
+        let value = *id;
+        LocalFree(id.cast());
+        [
+            PowerPlan::Balanced,
+            PowerPlan::PowerSaver,
+            PowerPlan::HighPerformance,
+        ]
+        .into_iter()
+        .find(|p| {
+            let expected = power_id(*p);
+            expected.data1 == value.data1
+                && expected.data2 == value.data2
+                && expected.data3 == value.data3
+                && expected.data4 == value.data4
+        })
+    }
+}
+fn power_id(plan: PowerPlan) -> GUID {
+    GUID::from_u128(match plan {
+        PowerPlan::Balanced => 0x381b4222_f694_41f0_9685_ff5bb260df2e,
+        PowerPlan::PowerSaver => 0xa1841308_3541_4fab_bc81_f71556f20b4a,
+        PowerPlan::HighPerformance => 0x8c5e7fda_e8bf_4a96_9a85_a6e23a8c635c,
+    })
+}
+
 pub fn power(plan: PowerPlan) -> Result<(), String> {
-    let id = match plan {
-        PowerPlan::Balanced => GUID::from_u128(0x381b4222_f694_41f0_9685_ff5bb260df2e),
-        PowerPlan::PowerSaver => GUID::from_u128(0xa1841308_3541_4fab_bc81_f71556f20b4a),
-        PowerPlan::HighPerformance => GUID::from_u128(0x8c5e7fda_e8bf_4a96_9a85_a6e23a8c635c),
-    };
+    let id = power_id(plan);
     // SAFETY: Standard system scheme GUID; null root selects current user's policy store.
     let code = unsafe { PowerSetActiveScheme(ptr::null_mut(), &id) };
     if code != 0 {

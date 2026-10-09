@@ -1,5 +1,19 @@
 # Benchmark methodology
 
+## Native v0.3 — simplified UI
+
+Final release artifacts: mcc.exe **821,248 bytes**, SHA-256 `e7fb075d1913f1161007ff9f40dc0d626073f4deb5cf847dcf97468fbca07c10`; mcc-ui.exe **641,024 bytes**, SHA-256 `d14c65d230c62541c4acaa16873f2f95b90d2ffeb18686a8e2796227816b5a3d`.
+
+- Visible UI: **30,140.314 ms**, process CPU **218.75 ms**, working/peak set **15,728,640 bytes (15 MiB)**, private commit **2,486,272 bytes**. Thirty paints; nine initial button paints. Total measured paint wall time **106.768 ms**, OS dashboard calls **10.102 ms**.
+- Hidden UI: **30,090.720 ms**, process CPU **46.875 ms**, working/peak set **12,492,800 bytes (11.91 MiB)**, private commit **1,933,312 bytes**, zero paints. Hidden benchmark adds a 1 Hz measurement timer; ordinary hidden mode has no dashboard timer.
+- This averages **0.73% of one logical CPU**, including initialization. It is not a steady-state CPU percentage or game-performance result. Strict linting and a short release test run overlapped the first part of the visible measurement; no UI automation client was active.
+- A separate ten-second run after resetting the UI inspection session used **125 ms CPU**, **15,642,624 bytes working set**, **47.147 ms paint wall time** and **3.676 ms OS-dashboard wall time**.
+- An earlier run during the UI inspection session measured **7,953.125 ms CPU / 30,181.743 ms**, working set **19,664,896 bytes**. Subsequent instrumentation found no repaint loop (one paint per second). Periodic painting was restricted to dashboard values, dialog routing to keyboard messages, and the inspection client was reset. The final numbers reflect all those changes; this experiment does not isolate one cause for the earlier high figure. Raw reports remain ignored/local.
+- Local validation: **69 library + 4 worker + 6 executable integration tests = 79 passed**. Strict Clippy and both final PE audits passed. The real native self-test checks page isolation, animation-field visibility, disabled startup writes and responsiveness during a 500 ms synthetic worker delay.
+- Actual UI preview testing reproduced a failed light-bar acknowledgement, then successfully switched OFF without reconnecting. The preview backend simulates every hardware operation. Physical timing still needs retesting on the laptop. No new hardware writes occurred during this UI revision's tests or benchmarks; the unprivileged status probe correctly reported administrator access required.
+
+All UI measurements include startup, use quantized Windows process counters and access OS metrics only. They do not establish thermal/noise improvement, game FPS, idle power, zero impact, OEM speedup or safety under every workload.
+
 ## Native v0.2 preview — source 88805bf
 
 Final release artifacts: mcc.exe **818,176 bytes**, SHA-256 `6f18daec6dcd0c68b466a5eef7d963a375e3c8c41b9c5227b67c05dc69d3ded3`; mcc-ui.exe **629,248 bytes**, SHA-256 `efbee97e1f422a7afa7d4f618bc19dc45c3de7225a11dd10e5638405d52a1d0a`.

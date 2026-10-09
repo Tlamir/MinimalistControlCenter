@@ -39,8 +39,8 @@ pub enum HardwareAction {
     ResumeOem,
 }
 
-pub const HELP: &str = "Minimalist Control Center 0.2\n\n\
-Usage:\n  mcc status [--json]\n  mcc schema [--json]\n  mcc watch [--seconds 10] [--interval-ms 1000] [--json]\n  mcc bench [--iterations 1000000]\n  mcc simulate\n  mcc hardware status\n  mcc hardware fan-auto|fan-boost\n  mcc hardware key-lock-on|key-lock-off|usb-on|usb-off|light-bar-on|light-bar-off\n  mcc lighting off|solid|breathing|rainbow|wave|reactive BRIGHTNESS SPEED RRGGBB DIRECTION\n  mcc power balanced|saver|performance\n  mcc-ui.exe [--connect]\n\n\
+pub const HELP: &str = "Minimalist Control Center 0.3\n\n\
+Usage:\n  mcc status [--json]\n  mcc schema [--json]\n  mcc watch [--seconds 10] [--interval-ms 1000] [--json]\n  mcc bench [--iterations 1000000]\n  mcc simulate\n  mcc hardware status\n  mcc hardware fan-auto|fan-boost\n  mcc hardware key-lock-on|key-lock-off|usb-on|usb-off|light-bar-on|light-bar-off\n  mcc lighting off|solid|breathing|rainbow|wave BRIGHTNESS SPEED RRGGBB DIRECTION\n  mcc power balanced|saver|performance\n  mcc-ui.exe [--connect]\n\n\
 schema: opt-in WMI metadata only, bounded to 10 seconds. No vendor methods run.\n\
 watch: OS counters only; 1–3600 seconds, 250–60000 ms interval.\n\
 bench/simulate: synthetic in-memory policy only; never control real fans.\n\
