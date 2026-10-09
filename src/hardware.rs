@@ -83,6 +83,7 @@ impl Ec for NativeEc {
                 | control::BOOST2
                 | control::STATUS
                 | control::TRIGGER
+                | 1086 | 6148 | 1922 | 1859..=1863 | 1929..=1933
         ) {
             return Err("EC read is outside the allowlist".into());
         }
@@ -194,6 +195,24 @@ pub struct HardwareStatus {
     pub writes_allowed: bool,
     pub ownership_reason: Option<String>,
 }
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Observation {
+    pub mode: u8,
+    pub writes_allowed: bool,
+    pub ownership_reason: Option<String>,
+}
+pub fn observe() -> Result<Observation, String> {
+    let _guard = Ownership::acquire()?;
+    let mut ec = NativeEc::connect()?;
+    let mode = control::observed_mode(&mut ec)?;
+    let ownership_reason = check_competing_controller().err();
+    Ok(Observation {
+        mode,
+        writes_allowed: ownership_reason.is_none(),
+        ownership_reason,
+    })
+}
 
 pub fn status() -> Result<HardwareStatus, String> {
     let _guard = Ownership::acquire()?;
@@ -205,6 +224,35 @@ pub fn status() -> Result<HardwareStatus, String> {
         capabilities,
         ownership_reason,
     })
+}
+/// Diagnostic raw candidates, NOT validated Celsius, RPM, percentages, or permission to write.
+pub fn calibration_probe() -> Result<serde_json::Value, String> {
+    let _guard = Ownership::acquire()?;
+    let mut ec = NativeEc::connect()?;
+    let mut raw = std::collections::BTreeMap::new();
+    for address in [
+        1086,
+        6148,
+        1922,
+        control::MODE,
+        control::BOOST2,
+        1859,
+        1860,
+        1861,
+        1862,
+        1863,
+        1929,
+        1930,
+        1931,
+        1932,
+        1933,
+    ] {
+        raw.insert(address.to_string(), ec.read(address)?);
+    }
+    Ok(
+        serde_json::json!({"validated":false,"hardware_writes":0,"raw_bytes":raw,
+        "note":"Read-only candidates. Compare independently across idle/load/cooldown; these are not calibrated temperatures or RPM."}),
+    )
 }
 pub fn fan(mode: FanMode) -> Result<(), String> {
     let _guard = Ownership::acquire()?;

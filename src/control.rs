@@ -34,7 +34,7 @@ pub enum Switch {
     LightBar,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
     pub fan_mode_raw: u8,
@@ -131,6 +131,13 @@ pub(crate) fn capabilities(ec: &mut impl Ec) -> Result<Capabilities, String> {
         usb_charging_enabled: trigger & 16 != 0,
         light_bar_enabled: status & 2 != 0,
     })
+}
+pub(crate) fn observed_mode(ec: &mut impl Ec) -> Result<u8, String> {
+    let mode = ec.read(MODE)?;
+    if !matches!(mode, 0 | 16 | 64 | 128..=133 | 160) {
+        return Err("Invalid fan observation; stale state discarded".into());
+    }
+    Ok(mode)
 }
 
 pub(crate) fn set_fan(ec: &mut impl Ec, mode: FanMode) -> Result<(), String> {
@@ -353,6 +360,17 @@ mod tests {
     fn automatic_is_idempotent() {
         let mut m = Mock::new();
         set_fan(&mut m, FanMode::Auto).unwrap();
+        assert!(m.writes.is_empty());
+    }
+    #[test]
+    fn observation_never_writes_and_rejects_invalid_state() {
+        let mut m = Mock::new();
+        m.values.insert(MODE, 64);
+        assert_eq!(observed_mode(&mut m).unwrap(), 64);
+        m.values.insert(MODE, 0);
+        assert_eq!(observed_mode(&mut m).unwrap(), 0);
+        m.values.insert(MODE, 255);
+        assert!(observed_mode(&mut m).is_err());
         assert!(m.writes.is_empty());
     }
     #[test]

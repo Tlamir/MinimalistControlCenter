@@ -9,6 +9,26 @@ use std::{
 
 pub const OUTPUT_LIMIT: usize = 64 * 1024;
 
+/// Keep the helper and its immediate directory stable while an elevated UI can launch it.
+/// No write/delete sharing for the helper, and no directory rename sharing.
+#[cfg(windows)]
+pub fn lock_helper(path: &std::path::Path) -> std::io::Result<(std::fs::File, std::fs::File)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path.parent().ok_or(std::io::ErrorKind::InvalidInput)?)?;
+    let helper = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)?;
+    Ok((directory, helper))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum RunError {
     Spawn,
@@ -151,5 +171,22 @@ mod tests {
                 .unwrap()
                 .contains("fixture works")
         );
+    }
+    #[cfg(windows)]
+    #[test]
+    fn helper_lease_blocks_replacement_while_allowing_readers() {
+        let directory =
+            std::env::temp_dir().join(format!("mcc-helper-lease-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("helper.txt");
+        std::fs::write(&path, b"trusted").unwrap();
+        let lease = lock_helper(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"trusted");
+        assert!(std::fs::write(&path, b"changed").is_err());
+        assert!(std::fs::rename(&path, directory.join("moved.txt")).is_err());
+        assert!(std::fs::rename(&directory, directory.with_extension("moved")).is_err());
+        drop(lease);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 }

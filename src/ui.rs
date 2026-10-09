@@ -2,6 +2,8 @@
 use mcc::{
     control::{FanMode, Switch},
     lighting::{Effect, Lighting},
+    monitor::Monitor,
+    presets::Preset,
     session::Session,
     settings::{PowerPlan, Settings},
 };
@@ -32,6 +34,8 @@ const CONNECT: u16 = 101;
 const AUTO: u16 = 103;
 const BOOST: u16 = 104;
 const QUIET: u16 = 105;
+const STARTUP: u16 = 124;
+const CUSTOM: u16 = 125;
 const BALANCED: u16 = 106;
 const PERFORMANCE: u16 = 107;
 const APPLY_LIGHT: u16 = 108;
@@ -84,31 +88,41 @@ fn caption(hwnd: HWND, t: &str) {
 enum Job {
     Connect,
     Status,
-    Fan(FanMode),
+    Poll,
+    ReconnectPoll,
+    Preset(Preset),
+    Startup(bool),
     Switch(Switch, bool),
     Light(Lighting),
-    Power(PowerPlan),
     Gpu,
     Restore,
     ResponsivenessTest,
 }
 struct Completed {
     status: Option<mcc::hardware::HardwareStatus>,
+    observation: Option<mcc::hardware::Observation>,
     status_failed: bool,
+    passive: bool,
     message: String,
     error: bool,
     lighting: Option<Lighting>,
     power: Option<PowerPlan>,
+    power_refreshed: bool,
+    stop_monitor: bool,
 }
 impl Completed {
     fn message(message: impl Into<String>) -> Self {
         Self {
             status: None,
+            observation: None,
             status_failed: false,
+            passive: false,
             message: message.into(),
             error: false,
             lighting: None,
             power: None,
+            power_refreshed: false,
+            stop_monitor: false,
         }
     }
 }
@@ -153,15 +167,66 @@ fn operation(job: &Job) -> Result<Completed, String> {
             {
                 call(&["hardware".into(), "pause-oem".into()])?;
             }
-            "Controls enabled. Choose Automatic or Cooling boost."
+            "Controls enabled. Choose a workload preset; fan state stays synchronized."
         }
-        Job::Status => "Settings refreshed.",
-        Job::Fan(f) => {
-            call(&fan_args(*f))?;
-            if *f == FanMode::Auto {
-                "Automatic cooling confirmed."
+        Job::Status | Job::ReconnectPoll => "Settings refreshed.",
+        Job::Poll => {
+            let mut r = Completed::message("Fan state synchronized.");
+            r.observation = Some(
+                serde_json::from_value(
+                    call(&["hardware".into(), "observe".into()])?["observation"].clone(),
+                )
+                .map_err(|e| e.to_string())?,
+            );
+            if let Some(o) = &r.observation {
+                if !o.writes_allowed {
+                    r.error = true;
+                    r.message = o
+                        .ownership_reason
+                        .clone()
+                        .unwrap_or("Original controller has control.".into());
+                }
+            }
+            return Ok(r);
+        }
+        Job::Startup(on) => {
+            mcc::startup::set(*on)?;
+            if *on {
+                "Starts in the tray when you sign in. Hardware control still requires Enable controls."
             } else {
-                "Cooling boost confirmed. Select Automatic to return to normal cooling."
+                "Windows startup disabled."
+            }
+        }
+        Job::Preset(p) => {
+            mcc::presets::apply(
+                *p,
+                |f| call(&fan_args(f)).map(|_| ()),
+                |power| {
+                    call(&[
+                        "power".into(),
+                        match power {
+                            PowerPlan::PowerSaver => "saver",
+                            PowerPlan::Balanced => "balanced",
+                            PowerPlan::HighPerformance => "performance",
+                        }
+                        .into(),
+                    ])
+                    .map(|_| ())
+                },
+            )?;
+            match p {
+                Preset::Office => {
+                    "Office: adaptive fans + Windows Power Saver. Less CPU power; fan speed still follows heat."
+                }
+                Preset::Balanced => {
+                    "Balanced: adaptive fans + Windows Balanced. Cooling follows workload."
+                }
+                Preset::High => {
+                    "High: adaptive fans + Windows High Performance. May generate more heat and noise."
+                }
+                Preset::Turbo => {
+                    "Turbo: firmware cooling boost. Pressing the laptop button updates this app automatically."
+                }
             }
         }
         Job::Switch(s, on) => {
@@ -221,28 +286,6 @@ fn operation(job: &Job) -> Result<Completed, String> {
             r.lighting = Some(c.clone());
             return Ok(r);
         }
-        Job::Power(p) => {
-            // Quiet must also exit boost, otherwise reducing CPU power could leave fans loud.
-            if *p == PowerPlan::PowerSaver {
-                call(&fan_args(FanMode::Auto))?;
-            }
-            call(&[
-                "power".into(),
-                match p {
-                    PowerPlan::PowerSaver => "saver",
-                    PowerPlan::Balanced => "balanced",
-                    PowerPlan::HighPerformance => "performance",
-                }
-                .into(),
-            ])?;
-            let mut r = Completed::message(if *p == PowerPlan::PowerSaver {
-                "Quiet: automatic fans and Windows Power Saver. Available performance is reduced."
-            } else {
-                "Windows power plan updated."
-            });
-            r.power = Some(*p);
-            return Ok(r);
-        }
         Job::Gpu => {
             let v = call(&["gpu".into()])?;
             return Ok(Completed::message(format!(
@@ -263,7 +306,10 @@ fn operation(job: &Job) -> Result<Completed, String> {
     Ok(Completed::message(message))
 }
 fn worker(job: Job) -> Completed {
-    worker_with(job, operation, hardware_status)
+    let mut r = worker_with(job, operation, hardware_status);
+    r.power = mcc::desktop::active_power();
+    r.power_refreshed = true;
+    r
 }
 fn worker_with(
     job: Job,
@@ -274,16 +320,21 @@ fn worker_with(
         job,
         Job::Connect
             | Job::Status
-            | Job::Fan(_)
+            | Job::ReconnectPoll
+            | Job::Preset(_)
             | Job::Switch(_, _)
             | Job::Restore
-            | Job::Power(PowerPlan::PowerSaver)
     );
     let mut r = apply(&job).unwrap_or_else(|e| {
         let mut r = Completed::message(e);
         r.error = true;
         r
     });
+    r.passive = matches!(job, Job::Poll | Job::ReconnectPoll);
+    if matches!(job, Job::Poll) && r.error && r.observation.is_none() {
+        r.status_failed = true;
+    }
+    r.stop_monitor = matches!(job, Job::Restore) && !r.error;
     // Recover by reading, never by replaying a possibly completed write.
     if needs_status {
         match status() {
@@ -323,7 +374,11 @@ fn demo_caps() -> mcc::control::Capabilities {
 fn demo_worker(job: Job, c: &mut mcc::control::Capabilities, fail: &mut bool) -> Completed {
     let mut r = Completed::message("Preview only · no hardware changes.");
     match job {
-        Job::Fan(f) => c.fan_mode_raw = f.byte(),
+        Job::Preset(p) => {
+            c.fan_mode_raw = p.fan().byte();
+            r.power = p.power();
+        }
+        Job::Poll => r.passive = true,
         Job::Switch(s, on) => {
             if *fail && s == Switch::LightBar {
                 *fail = false;
@@ -337,12 +392,6 @@ fn demo_worker(job: Job, c: &mut mcc::control::Capabilities, fail: &mut bool) ->
                     Switch::UsbCharging => c.usb_charging_enabled = on,
                     Switch::WindowsKeyLock => c.windows_key_locked = on,
                 }
-            }
-        }
-        Job::Power(p) => {
-            r.power = Some(p);
-            if p == PowerPlan::PowerSaver {
-                c.fan_mode_raw = 0;
             }
         }
         Job::ResponsivenessTest => {
@@ -379,6 +428,7 @@ struct Benchmark {
 }
 struct App {
     hwnd: HWND,
+    taskbar_created: u32,
     fonts: [HFONT; 4],
     dpi: i32,
     buttons: Vec<Button>,
@@ -386,6 +436,10 @@ struct App {
     tx: SyncSender<Job>,
     rx: Receiver<Completed>,
     session: Session,
+    monitor: Monitor,
+    clock: Instant,
+    visible: bool,
+    startup: bool,
     message: String,
     error: bool,
     lighting: Lighting,
@@ -409,8 +463,33 @@ struct App {
 }
 thread_local! {static APP:RefCell<Option<App>>=const {RefCell::new(None)};}
 impl App {
+    fn font_faces(&self) -> Vec<String> {
+        // SAFETY: Our window's DC is released after use; selected font restored each time.
+        unsafe {
+            let dc = GetDC(self.hwnd);
+            if dc.is_null() {
+                return vec![];
+            }
+            let result = self
+                .fonts
+                .iter()
+                .map(|font| {
+                    let old = SelectObject(dc, *font);
+                    let mut name = [0u16; 128];
+                    GetTextFaceW(dc, name.len() as i32, name.as_mut_ptr());
+                    SelectObject(dc, old);
+                    String::from_utf16_lossy(
+                        &name[..name.iter().position(|v| *v == 0).unwrap_or(name.len())],
+                    )
+                })
+                .collect();
+            ReleaseDC(self.hwnd, dc);
+            result
+        }
+    }
     fn check_pages(&mut self) -> bool {
-        let mut passed = true;
+        let faces = self.font_faces();
+        let mut passed = faces.len() == 4 && faces.iter().all(|s| s.starts_with("Segoe UI"));
         let previous = self.lighting.effect;
         self.lighting.effect = Effect::Solid;
         for page in [Page::Cooling, Page::Lighting, Page::Settings] {
@@ -422,7 +501,10 @@ impl App {
                 // SAFETY: Query only UI-owned control styles; root is hidden during this self-test.
                 let style = unsafe { GetWindowLongW(b.hwnd, GWL_STYLE) } as u32;
                 passed &= (style & WS_VISIBLE != 0) == expected;
-                if matches!(b.id, AUTO | BOOST | KEY | USB | BAR | APPLY_LIGHT) {
+                if matches!(
+                    b.id,
+                    QUIET | BALANCED | PERFORMANCE | BOOST | KEY | USB | BAR | APPLY_LIGHT
+                ) {
                     passed &= style & WS_DISABLED != 0;
                 }
             }
@@ -487,6 +569,19 @@ impl App {
             .map_or(ptr::null_mut(), |b| b.hwnd)
     }
     fn refresh_controls(&self) {
+        let mut tray = self.tray;
+        if tray.cbSize != 0 {
+            let tip = wide(&format!(
+                "Minimalist · {}",
+                mcc::session::fan_label(self.session.capabilities.as_ref().map(|c| c.fan_mode_raw))
+            ));
+            tray.szTip.fill(0);
+            tray.szTip[..tip.len()].copy_from_slice(&tip);
+            // SAFETY: Initialized tray data copied by Windows; fixed short tooltip.
+            unsafe {
+                Shell_NotifyIconW(NIM_MODIFY, &tray);
+            }
+        }
         let c = self.session.capabilities.as_ref();
         caption(
             self.handle(CONNECT),
@@ -497,6 +592,10 @@ impl App {
             } else {
                 "Enable controls"
             },
+        );
+        caption(
+            self.handle(STARTUP),
+            if self.startup { "On" } else { "Off" },
         );
         for (id, s) in [
             (KEY, Switch::WindowsKeyLock),
@@ -552,8 +651,8 @@ impl App {
                 KEY => self.session.ready() && c.is_some_and(|c| c.windows_key_lock),
                 USB => self.session.ready() && c.is_some_and(|c| c.usb_charging),
                 BAR => self.session.ready() && c.is_some_and(|c| c.light_bar),
-                QUIET => self.session.ready(),
-                BALANCED | PERFORMANCE | GPU_TEMP => !self.session.busy,
+                QUIET | BALANCED | PERFORMANCE => self.session.ready(),
+                GPU_TEMP | STARTUP => !self.session.busy,
                 _ => true,
             };
             // SAFETY: UI-owned child handles on their owning thread.
@@ -586,19 +685,83 @@ impl App {
             self.refresh_controls();
         }
     }
+    fn poll(&mut self) {
+        if self
+            .monitor
+            .due(self.clock.elapsed().as_millis() as u64, self.session.busy)
+            && self
+                .tx
+                .try_send(if self.session.allowed {
+                    Job::Poll
+                } else {
+                    Job::ReconnectPoll
+                })
+                .is_err()
+        {
+            self.monitor
+                .completed(self.clock.elapsed().as_millis() as u64, self.visible, true);
+        }
+    }
     fn update(&mut self) {
         while let Ok(r) = self.rx.try_recv() {
             if r.message.starts_with("Synthetic worker") {
                 self.test_completed = true;
             }
-            self.session.complete(
-                r.status.map(|s| (s.capabilities, s.writes_allowed)),
-                r.status_failed,
-            );
-            self.message = r.message;
-            self.error = r.error;
-            if let Some(p) = r.power {
-                self.power = Some(p);
+            let old_caps = self.session.capabilities.clone();
+            let old_allowed = self.session.allowed;
+            let old_power = self.power;
+            if r.stop_monitor {
+                self.monitor.enabled = false;
+                // SAFETY: Cancel only our read-only observation timer.
+                unsafe {
+                    KillTimer(self.hwnd, 3);
+                }
+            } else if r.status.is_some()
+                && !self.monitor.enabled
+                && !self.demo
+                && self.benchmark.is_none()
+            {
+                self.monitor.enabled = true;
+                // SAFETY: UI-owned timer; activated only after explicit hardware connection.
+                unsafe {
+                    SetTimer(self.hwnd, 3, 1000, None);
+                }
+            }
+            if r.passive {
+                self.monitor.completed(
+                    self.clock.elapsed().as_millis() as u64,
+                    self.visible,
+                    r.status_failed || r.error,
+                );
+            }
+            if let Some(observation) = r.observation {
+                self.session
+                    .observe_mode(observation.mode, observation.writes_allowed);
+                if !observation.writes_allowed {
+                    self.message = observation
+                        .ownership_reason
+                        .unwrap_or("Original controller has control.".into());
+                    self.error = true;
+                }
+            }
+            let fresh = r.status.map(|s| (s.capabilities, s.writes_allowed));
+            if r.passive {
+                self.session.observe(fresh, r.status_failed);
+            } else {
+                self.session.complete(fresh, r.status_failed);
+            }
+            if !r.passive || r.error {
+                self.message = r.message;
+                self.error = r.error;
+            } else if !self.session.busy && old_caps != self.session.capabilities {
+                self.message = "Laptop controls changed. Display updated from firmware.".into();
+                self.error = false;
+            }
+            if !self.demo {
+                self.startup = mcc::startup::enabled().unwrap_or(false);
+            }
+            if r.power_refreshed || r.power.is_some() {
+                self.power = r.power;
             }
             if let Some(c) = r.lighting {
                 if let Some(p) = self
@@ -616,7 +779,14 @@ impl App {
                     }
                 }
             }
-            self.refresh_controls();
+            if !r.passive
+                || r.error
+                || old_caps != self.session.capabilities
+                || old_allowed != self.session.allowed
+                || old_power != self.power
+            {
+                self.refresh_controls();
+            }
         }
     }
     fn dashboard(&mut self) {
@@ -739,23 +909,33 @@ impl App {
                 self.refresh_controls();
             }
             CONNECT => self.connect(),
-            AUTO => {
-                if self.session.ready() {
-                    self.submit(Job::Fan(FanMode::Auto));
-                }
-            }
             BOOST => {
                 if self.session.ready() {
-                    self.submit(Job::Fan(FanMode::Boost));
+                    self.submit(Job::Preset(Preset::Turbo));
                 }
             }
-            QUIET => {
+            QUIET | BALANCED | PERFORMANCE | AUTO => {
                 if self.session.ready() {
-                    self.submit(Job::Power(PowerPlan::PowerSaver));
+                    self.submit(Job::Preset(match id {
+                        QUIET => Preset::Office,
+                        PERFORMANCE => Preset::High,
+                        _ => Preset::Balanced,
+                    }));
                 }
             }
-            BALANCED => self.submit(Job::Power(PowerPlan::Balanced)),
-            PERFORMANCE => self.submit(Job::Power(PowerPlan::HighPerformance)),
+            STARTUP => {
+                if self.demo {
+                    self.startup = !self.startup;
+                    self.refresh_controls();
+                } else {
+                    self.submit(Job::Startup(!self.startup));
+                }
+            }
+            CUSTOM => {
+                self.message = "Minimum-noise / custom fan speeds need verified sensors and firmware overheat recovery. Manual low speeds remain locked; workload presets never pin fans low.".into();
+                self.error = false;
+                self.invalidate();
+            }
             KEY | USB | BAR => {
                 let s = match id {
                     KEY => Switch::WindowsKeyLock,
@@ -889,7 +1069,8 @@ impl App {
             _ => {}
         }
     }
-    fn hide(&self) {
+    fn hide(&mut self) {
+        self.visible = false;
         // SAFETY: UI-owned HWND and timer; hidden dashboard polling stops.
         unsafe {
             ShowWindow(self.hwnd, SW_HIDE);
@@ -897,6 +1078,8 @@ impl App {
         }
     }
     fn show(&mut self) {
+        self.visible = true;
+        self.monitor.wake();
         // SAFETY: Live HWND, documented restore and one-second OS-only timer.
         unsafe {
             ShowWindow(self.hwnd, SW_RESTORE);
@@ -995,7 +1178,7 @@ impl App {
         match self.page {
             Page::Cooling => {
                 self.label(dc, "Cooling", 32, 171, 380, 34, 2, INK);
-                self.round(dc, self.rect(32, 219, 656, 187), WHITE, BORDER, 16);
+                self.round(dc, self.rect(32, 219, 656, 255), WHITE, BORDER, 16);
                 self.label(dc, "FAN MODE", 52, 238, 230, 24, 3, MUTED);
                 self.label(
                     dc,
@@ -1009,10 +1192,26 @@ impl App {
                     1,
                     GREEN,
                 );
-                self.label(dc,"Automatic follows your firmware's cooling policy. Boost requests faster cooling and may be louder.",52,356,616,42,3,MUTED);
-                self.round(dc, self.rect(32, 424, 656, 116), WHITE, BORDER, 16);
-                self.label(dc, "WINDOWS POWER PLAN", 52, 440, 420, 24, 3, MUTED);
-                self.label(dc,"CPU temperature and fan RPM are not calibrated. Custom fan curves are unavailable.",32,550,656,22,3,MUTED);
+                self.label(
+                    dc,
+                    "Adaptive cooling responds to heat. Turbo requests firmware boost.",
+                    52,
+                    439,
+                    616,
+                    25,
+                    3,
+                    MUTED,
+                );
+                self.label(
+                    dc,
+                    "Office reduces CPU power; High favors performance. Neither fixes fan speed.",
+                    32,
+                    486,
+                    656,
+                    34,
+                    3,
+                    MUTED,
+                );
             }
             Page::Lighting => {
                 self.label(dc, "Lighting", 32, 171, 380, 34, 2, INK);
@@ -1067,8 +1266,18 @@ impl App {
                     3,
                     MUTED,
                 );
-                self.round(dc, self.rect(32, 399, 656, 146), WHITE, BORDER, 16);
-                self.label(dc, "System", 52, 416, 420, 28, 1, INK);
+                self.round(dc, self.rect(32, 388, 656, 158), WHITE, BORDER, 16);
+                self.label(dc, "Start with Windows", 52, 399, 420, 28, 1, INK);
+                self.label(
+                    dc,
+                    "Opens in the tray. Enable controls requests permission after sign-in.",
+                    52,
+                    431,
+                    616,
+                    20,
+                    3,
+                    MUTED,
+                );
                 self.label(
                     dc,
                     &format!(
@@ -1114,19 +1323,18 @@ impl App {
             COOLING => self.page == Page::Cooling,
             LIGHTING => self.page == Page::Lighting,
             SETTINGS => self.page == Page::Settings,
-            AUTO => self
-                .session
-                .capabilities
-                .as_ref()
-                .is_some_and(|c| c.fan_mode_raw == 0),
-            BOOST => self
-                .session
-                .capabilities
-                .as_ref()
-                .is_some_and(|c| c.fan_mode_raw == 64),
-            QUIET => self.power == Some(PowerPlan::PowerSaver),
-            BALANCED => self.power == Some(PowerPlan::Balanced),
-            PERFORMANCE => self.power == Some(PowerPlan::HighPerformance),
+            QUIET | AUTO | BALANCED | PERFORMANCE | BOOST => {
+                Preset::observed(
+                    self.session.capabilities.as_ref().map(|c| c.fan_mode_raw),
+                    self.power,
+                ) == Some(match id {
+                    QUIET => Preset::Office,
+                    PERFORMANCE => Preset::High,
+                    BOOST => Preset::Turbo,
+                    _ => Preset::Balanced,
+                })
+            }
+            STARTUP => self.startup,
             KEY => self
                 .session
                 .capabilities
@@ -1205,7 +1413,7 @@ impl App {
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                 );
             }
-        } else if matches!(id, AUTO | BOOST) {
+        } else if matches!(id, QUIET | BALANCED | PERFORMANCE | AUTO | BOOST) {
             let p = self.px(18);
             r.left += p;
             r.top += self.px(12);
@@ -1214,10 +1422,11 @@ impl App {
             title.bottom = title.top + self.px(25);
             self.draw_text(
                 d.hDC,
-                if id == AUTO {
-                    "Automatic"
-                } else {
-                    "Cooling boost"
+                match id {
+                    QUIET => "Office",
+                    PERFORMANCE => "High",
+                    BOOST => "Turbo",
+                    _ => "Balanced · adaptive",
                 },
                 title,
                 1,
@@ -1227,10 +1436,11 @@ impl App {
             r.top += self.px(30);
             self.draw_text(
                 d.hDC,
-                if id == AUTO {
-                    "Adjust cooling to workload"
-                } else {
-                    "Faster fans for more cooling"
+                match id {
+                    QUIET => "Adaptive fans · lower CPU power",
+                    PERFORMANCE => "Adaptive fans · favor performance",
+                    BOOST => "Cooling boost · more fan noise",
+                    _ => "Cooling follows your workload",
                 },
                 r,
                 3,
@@ -1287,7 +1497,16 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
     }
     let handled=APP.with(|slot|{
         let Ok(mut slot)=slot.try_borrow_mut()else{return false;};let Some(a)=slot.as_mut()else{return false;};
+        if msg == a.taskbar_created && msg != 0 {
+            // SAFETY: Re-add our initialized tray icon after Explorer restarts.
+            unsafe { Shell_NotifyIconW(NIM_ADD, &a.tray); }
+            a.refresh_controls();
+            return true;
+        }
         match msg {
+            WM_SHOWWINDOW if w != 0 => { a.visible=true; a.monitor.wake();
+                // SAFETY: UI-owned dashboard timer when another instance restores this window.
+                unsafe { SetTimer(hwnd, 1, 1000, None); } true }
             WM_ERASEBKGND=>true,
             WM_PAINT=>{
                 a.paints += 1;
@@ -1302,13 +1521,15 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             WM_COMMAND=>{a.command((w&65535)as u16);true}
             WM_KEYDOWN if w==0x74=>{if a.session.capabilities.is_some(){a.submit(Job::Status);}true}
             UPDATE=>{a.update();true}
+            WM_POWERBROADCAST if w == 18 || w == 7 => { a.monitor.wake(); a.poll(); true }
+            WM_TIMER if w==3=>{a.poll();true}
             WM_TIMER=>{
                 a.ticks+=1;if a.session.busy{a.busy_ticks+=1;}
                 if w==2 {
                     if let Some(b)=&a.benchmark{if b.start.elapsed()>=Duration::from_secs(b.seconds){
                         let after=mcc::platform::metrics().value;
                         let passed=!b.self_test || (a.test_completed && a.busy_ticks>=3 && a.pages_checked && a.buttons.iter().all(|b|!b.hwnd.is_null()));
-                        let report=serde_json::json!({"ok":passed,"benchmark":"native_ui_os_counters_only","hidden":b.hidden,"wall_ms":b.start.elapsed().as_secs_f64()*1000.,"cpu_ms":after.map(|a|a.cpu_time_100ns.saturating_sub(b.before.cpu_time_100ns)as f64/10000.),"working_set_bytes":after.map(|a|a.working_set_bytes),"peak_working_set_bytes":after.map(|a|a.peak_working_set_bytes),"private_commit_bytes":after.map(|a|a.private_commit_bytes),"message_ticks":a.ticks,"ticks_during_worker_delay":a.busy_ticks,"worker_responsive":a.test_completed,"hardware_accessed":false,"pages":3,"paints":a.paints,"button_paints":a.button_paints,"paint_us":a.paint_us,"dashboard_us":a.dashboard_us,"pages_isolated_and_startup_writes_disabled":a.pages_checked,"note":"Includes startup. Windows CPU counters are quantized. No game FPS, thermal or OEM comparison."});
+                        let report=serde_json::json!({"ok":passed,"benchmark":"native_ui_os_counters_only","hidden":b.hidden,"wall_ms":b.start.elapsed().as_secs_f64()*1000.,"cpu_ms":after.map(|a|a.cpu_time_100ns.saturating_sub(b.before.cpu_time_100ns)as f64/10000.),"working_set_bytes":after.map(|a|a.working_set_bytes),"peak_working_set_bytes":after.map(|a|a.peak_working_set_bytes),"private_commit_bytes":after.map(|a|a.private_commit_bytes),"message_ticks":a.ticks,"ticks_during_worker_delay":a.busy_ticks,"worker_responsive":a.test_completed,"hardware_accessed":false,"pages":3,"font_faces":a.font_faces(),"paints":a.paints,"button_paints":a.button_paints,"paint_us":a.paint_us,"dashboard_us":a.dashboard_us,"pages_isolated_and_startup_writes_disabled":a.pages_checked,"note":"Includes startup. Windows CPU counters are quantized. No game FPS, thermal or OEM comparison."});
                         let _=std::fs::write(&b.path,serde_json::to_vec_pretty(&report).unwrap());
                         // SAFETY: Exit this UI after its bounded test/benchmark.
                         unsafe{PostMessageW(hwnd,WM_CLOSE,1,0);}
@@ -1343,10 +1564,25 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
 }
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["--enable-startup"] || args == ["--disable-startup"] {
+        if let Err(e) = mcc::startup::set(args == ["--enable-startup"]) {
+            // SAFETY: Error display uses static title and bounded generated message.
+            unsafe {
+                MessageBoxW(
+                    ptr::null_mut(),
+                    wide(&e).as_ptr(),
+                    wide("Minimalist startup").as_ptr(),
+                    MB_OK | MB_ICONERROR,
+                );
+            }
+            std::process::exit(1);
+        }
+        return;
+    }
     let demo = args == ["--demo"] || args == ["--demo-failure"];
     let mode = match args.as_slice() {
         [] => None,
-        [a] if a == "--connect" || a == "--demo" || a == "--demo-failure" => None,
+        [a] if a == "--connect" || a == "--tray" || a == "--demo" || a == "--demo-failure" => None,
         [a, path] if a == "--self-test" => Some((2, std::path::PathBuf::from(path), true, true)),
         [a, seconds, path] if a == "--benchmark" || a == "--benchmark-hidden" => {
             match seconds.parse::<u64>() {
@@ -1361,6 +1597,42 @@ pub fn run() {
         }
         _ => return,
     };
+    let _instance = if !demo && mode.is_none() {
+        match mcc::instance::acquire(args == ["--tray"]) {
+            Ok(Some(guard)) => Some(guard),
+            Ok(None) => return,
+            Err(e) => {
+                // SAFETY: Error display contains no action or executable command.
+                unsafe {
+                    MessageBoxW(
+                        ptr::null_mut(),
+                        wide(&e).as_ptr(),
+                        wide("Minimalist").as_ptr(),
+                        MB_OK | MB_ICONERROR,
+                    );
+                }
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let _helper_lease = if !demo && mode.is_none() {
+        let lease = std::env::current_exe()
+            .and_then(|p| mcc::process::lock_helper(&p.with_file_name("mcc.exe")));
+        match lease {
+            Ok(lease) => Some(lease),
+            Err(e) => {
+                // SAFETY: Informational error only; no control or recovery writes occur.
+                unsafe {
+                    MessageBoxW(ptr::null_mut(), wide(&format!("Keep mcc.exe alongside this app and close any updater before opening it. Helper could not be secured: {e}")).as_ptr(), wide("Minimalist").as_ptr(), MB_OK | MB_ICONERROR);
+                }
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let before = mcc::platform::metrics().value;
     // SAFETY: Set DPI awareness before creating windows; geometry/fonts scale consistently.
     unsafe {
@@ -1369,7 +1641,11 @@ pub fn run() {
     // SAFETY: Register Win32 callback and create own window with valid strings and handles.
     let hwnd = unsafe {
         let instance = GetModuleHandleW(ptr::null());
-        let class = wide("MinimalistControlCenter.Native");
+        let class = wide(if demo || mode.is_some() {
+            "MinimalistControlCenter.Native.Test"
+        } else {
+            mcc::instance::class()
+        });
         let wc = WNDCLASSW {
             lpfnWndProc: Some(procedure),
             hInstance: instance,
@@ -1476,6 +1752,8 @@ pub fn run() {
         .unwrap_or_default();
     let mut a = App {
         hwnd,
+        // SAFETY: Fixed registered Windows notification name copied by Windows.
+        taskbar_created: unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) },
         fonts,
         dpi,
         buttons: vec![],
@@ -1483,6 +1761,10 @@ pub fn run() {
         tx,
         rx,
         session: Session::default(),
+        monitor: Monitor::default(),
+        clock: Instant::now(),
+        visible: true,
+        startup: !demo && mcc::startup::enabled().unwrap_or(false),
         message: "Choose Enable controls to use fans and lighting. Nothing is applied on startup."
             .into(),
         error: false,
@@ -1528,16 +1810,16 @@ pub fn run() {
     let c = Some(Page::Cooling);
     let l = Some(Page::Lighting);
     let s = Some(Page::Settings);
+    a.button("Office", QUIET, c, (52, 273, 298, 70));
+    a.button("Balanced · adaptive", BALANCED, c, (370, 273, 298, 70));
+    a.button("High", PERFORMANCE, c, (52, 354, 298, 70));
+    a.button("Turbo", BOOST, c, (370, 354, 298, 70));
     a.button(
-        "Automatic · adjust cooling to workload",
-        AUTO,
+        "Minimum-noise / custom fans · not yet verified",
+        CUSTOM,
         c,
-        (52, 273, 298, 70),
+        (32, 528, 656, 36),
     );
-    a.button("Cooling boost · faster fans", BOOST, c, (370, 273, 298, 70));
-    a.button("Quiet", QUIET, c, (52, 478, 194, 42));
-    a.button("Balanced", BALANCED, c, (262, 478, 194, 42));
-    a.button("Performance", PERFORMANCE, c, (474, 478, 194, 42));
     a.button("Apply keyboard", APPLY_LIGHT, l, (496, 236, 172, 36));
     a.button("Solid", EFFECT, l, (52, 307, 286, 34));
     a.button("High", BRIGHTNESS, l, (364, 307, 304, 34));
@@ -1558,6 +1840,7 @@ pub fn run() {
     a.button("Unavailable", BAR, l, (548, 522, 120, 32));
     a.button("Unavailable", KEY, s, (548, 247, 120, 34));
     a.button("Unavailable", USB, s, (548, 319, 120, 34));
+    a.button("Off", STARTUP, s, (548, 396, 120, 34));
     a.button("Turn screen off", SCREEN_OFF, s, (52, 455, 194, 36));
     a.button("Graphics settings", GPU, s, (262, 455, 194, 36));
     a.button("Read GPU temp", GPU_TEMP, s, (474, 455, 194, 36));
@@ -1590,7 +1873,8 @@ pub fn run() {
     if args == ["--connect"] {
         a.submit(Job::Connect);
     }
-    let hidden = a.benchmark.as_ref().is_some_and(|b| b.hidden);
+    let hidden = args == ["--tray"] || a.benchmark.as_ref().is_some_and(|b| b.hidden);
+    a.visible = !hidden;
     let test = a.benchmark.as_ref().is_some_and(|b| b.self_test);
     let benchmark = a.benchmark.is_some();
     if test {
@@ -1668,7 +1952,7 @@ mod tests {
     #[test]
     fn lost_readback_disables_controls_instead_of_using_cached_state() {
         let r = worker_with(
-            Job::Fan(FanMode::Boost),
+            Job::Preset(Preset::Turbo),
             |_| Ok(Completed::message("sent")),
             || Err("transport gone".into()),
         );
@@ -1676,14 +1960,26 @@ mod tests {
         assert!(r.status.is_none());
     }
     #[test]
-    fn unrelated_power_error_does_not_poll_or_disable_hardware() {
+    fn unrelated_startup_error_does_not_poll_or_disable_hardware() {
         let r = worker_with(
-            Job::Power(PowerPlan::Balanced),
+            Job::Startup(true),
             |_| Err("plan unavailable".into()),
             || panic!("unexpected firmware poll"),
         );
         assert!(r.error);
         assert!(!r.status_failed);
+    }
+    #[test]
+    fn passive_full_recovery_reads_once_and_failed_narrow_poll_discards_state() {
+        let r = worker_with(Job::ReconnectPoll, operation, || Ok(ready()));
+        assert!(r.passive && !r.error);
+        assert!(r.status.is_some());
+        let r = worker_with(
+            Job::Poll,
+            |_| Err("read failed".into()),
+            || panic!("no redundant full read"),
+        );
+        assert!(r.passive && r.status_failed && r.error);
     }
     #[test]
     fn restoring_original_controller_is_success_when_it_owns_hardware() {
@@ -1698,6 +1994,7 @@ mod tests {
             },
         );
         assert!(!r.error);
+        assert!(r.stop_monitor);
         assert!(!r.status.unwrap().writes_allowed);
     }
 }

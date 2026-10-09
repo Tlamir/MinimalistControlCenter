@@ -1,3 +1,13 @@
+# v0.4 investigation update — 10 October 2026
+
+The owner confirmed that the physical turbo button changes cooling but the v0.3 display stayed stale. v0.4 adds bounded read-only observation and derives highlighted presets from observed mode and active Windows plan. It never replays the old fan request to fight a physical-button change.
+
+Independent static findings from the installed controller: mode 1873 uses 0 for adaptive and 64 for boost; older fixed levels occupy 128–133 and custom table mode is 160. Old MyFan2 table entries are 1859–1863; generation byte 1922 bit 3 selects MyFan3. Prior read of 1922 was zero on this laptop. The OEM has an application-side over-temperature event path. **Autonomous thermal override for reduced fan settings remains unverified.** No new fan-write value is enabled.
+
+Read-only calibration diagnostics add raw candidates 1086/6148, generation 1922, table 1859–1863, and defaults 1929–1933. They are not presented as Celsius, RPM or validated percentages. [Community transport/control observations](https://gitlab.com/siphomateke/tongfang-control/-/raw/master/tongfang_control/fan.py) corroborate mode locations but describe generation-dependent temperature bands; they cannot prove this laptop's thermal limits.
+
+The historical notes below retain the evidence chronology. Statements about an earlier release lacking a backend do not describe the current v0.4 executable.
+
 # Protocol investigation
 
 ## Runtime update — v0.2

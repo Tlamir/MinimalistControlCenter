@@ -65,7 +65,7 @@ def imports(path):
 def main():
     found = imports(sys.argv[1])
     forbidden_functions = {
-        'RegSetValueExW', 'RegSetValueExA',
+        'RegSetValueExA',
         'RegSetKeyValueW', 'WriteProcessMemory',
         'PowerWriteACValueIndex', 'PowerWriteDCValueIndex',
         'CreateServiceW', 'ChangeServiceConfigW', 'NtLoadDriver',
@@ -77,6 +77,7 @@ def main():
             errors.append(dll)
         errors.extend(f'{dll}:{symbol}' for symbol in symbols if symbol in forbidden_functions)
     print(json.dumps({'imports': found, 'forbidden_imports': errors,
+                      'reviewed_registry_write': 'RegSetValueExW is allowed only for the fixed HKCU Run/MinimalistControlCenter startup value; review src/startup.rs. Import audit cannot enforce a registry path.',
                       'scope': 'No driver installation/configuration, raw EC I/O libraries, remote memory writes or power-limit writes. HID, standard power-plan selection and reversible handover of the fixed OEM user-mode launcher are expected in v0.2.'}, indent=2))
     return bool(errors)
 

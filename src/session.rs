@@ -8,6 +8,18 @@ pub struct Session {
     pub busy: bool,
 }
 impl Session {
+    /// A narrow mode observation can revoke access, but cannot grant it or fabricate capabilities.
+    pub fn observe_mode(&mut self, mode: u8, allowed: bool) {
+        if let Some(caps) = self.capabilities.as_mut() {
+            caps.fan_mode_raw = mode;
+        }
+        self.allowed &= allowed;
+    }
+    pub fn observe(&mut self, fresh: Option<(Capabilities, bool)>, status_failed: bool) {
+        let busy = self.busy;
+        self.complete(fresh, status_failed);
+        self.busy = busy;
+    }
     /// Only a fresh hardware status grants access. A failed status revokes it;
     /// unrelated power/lighting errors do not invent a disconnection.
     pub fn complete(&mut self, fresh: Option<(Capabilities, bool)>, status_failed: bool) {
@@ -38,8 +50,8 @@ impl Session {
 }
 pub fn fan_label(byte: Option<u8>) -> &'static str {
     match byte {
-        Some(0) => "Automatic",
-        Some(64) => "Cooling boost",
+        Some(0) => "Adaptive",
+        Some(64) => "Turbo",
         Some(_) => "Firmware preset",
         None => "Not connected",
     }
@@ -94,5 +106,35 @@ mod tests {
     fn labels_never_imply_auto_for_unknown_firmware_mode() {
         assert_eq!(fan_label(Some(128)), "Firmware preset");
         assert_eq!(fan_label(None), "Not connected");
+    }
+    #[test]
+    fn physical_turbo_change_updates_state_without_clearing_a_queued_user_action() {
+        let mut s = Session::default();
+        let mut boosted = caps();
+        boosted.fan_mode_raw = 64;
+        s.complete(Some((boosted, true)), false);
+        s.busy = true;
+        s.observe(Some((caps(), true)), false);
+        assert_eq!(s.capabilities.as_ref().unwrap().fan_mode_raw, 0);
+        assert!(s.busy);
+        assert!(!s.ready());
+        s.observe(None, true);
+        assert!(s.busy);
+        assert!(!s.allowed);
+        assert!(s.capabilities.is_none());
+    }
+    #[test]
+    fn narrow_observation_never_grants_ownership_or_clears_pending_work() {
+        let mut s = Session::default();
+        s.observe_mode(64, true);
+        assert!(!s.allowed && s.capabilities.is_none());
+        s.complete(Some((caps(), true)), false);
+        s.busy = true;
+        s.observe_mode(64, true);
+        assert!(s.busy && s.allowed);
+        assert_eq!(s.capabilities.as_ref().unwrap().fan_mode_raw, 64);
+        s.observe_mode(0, false);
+        s.observe_mode(0, true);
+        assert!(!s.allowed);
     }
 }

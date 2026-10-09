@@ -53,6 +53,12 @@ pub fn power(plan: PowerPlan) -> Result<(), String> {
             "Power plan unavailable (Windows status {code}); no replacement plan is created"
         ));
     }
+    if active_power() != Some(plan) {
+        return Err(
+            "Windows did not confirm the requested power plan; current settings were refreshed"
+                .into(),
+        );
+    }
     Ok(())
 }
 pub fn screen_off() -> Result<(), String> {

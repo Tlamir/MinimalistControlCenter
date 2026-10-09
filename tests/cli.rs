@@ -7,6 +7,20 @@ fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_mcc"))
 }
 
+#[cfg(windows)]
+#[test]
+fn protected_helper_can_still_be_launched() {
+    let _lease =
+        mcc::process::lock_helper(std::path::Path::new(env!("CARGO_BIN_EXE_mcc"))).unwrap();
+    let output = binary().arg("--version").output().unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .starts_with("mcc ")
+    );
+}
+
 #[test]
 fn actual_binary_reports_read_only_and_unknown_temperatures() {
     let output = binary().args(["status", "--json"]).output().unwrap();

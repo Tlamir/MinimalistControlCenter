@@ -7,15 +7,20 @@ pub mod desktop;
 pub mod gpu;
 #[cfg(windows)]
 pub mod hardware;
+#[cfg(windows)]
+pub mod instance;
 pub mod lighting;
+pub mod monitor;
 #[cfg(windows)]
 mod oem;
 pub mod platform;
 pub mod policy;
+pub mod presets;
 pub mod process;
 pub mod schema;
 pub mod session;
 pub mod settings;
+pub mod startup;
 
 use serde::Serialize;
 use std::time::Duration;

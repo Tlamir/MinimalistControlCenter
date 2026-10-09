@@ -1,3 +1,29 @@
+# v0.4 validation — 10 October 2026
+
+Final local release suite: **93 passed** (81 library, 5 native-worker, 7 executable integration tests). Strict Clippy and formatting pass. Both final PE import audits pass. Native self-test verifies Segoe UI resolution, page isolation, disabled startup hardware controls and message processing during a delayed worker. Helper leases reject replacement/rename but still allow actual CLI execution.
+
+The app was installed into the owner's versioned LocalAppData directory. Actual startup enable/disable/idempotent-disable/re-enable readbacks passed, leaving startup enabled. Installed tray launch and duplicate-instance exit passed, with no visible main window or enabled hardware controls. A real Windows reboot remains an owner check.
+
+| Measurement | Duration | Process CPU | Working set | Paints |
+|---|---:|---:|---:|---:|
+| Visible UI, before final helper-lease addition | 30.224s | 62.500ms | 14.86 MiB | 30 |
+| Final binary, hidden benchmark | 10.074s | 31.250ms | 14.04 MiB | 0 |
+
+These UI-only measurements include startup and **exclude firmware polling, helper processes and WMI-provider cost**. CPU counters are quantized. The hidden benchmark has a measurement timer; ordinary disconnected tray startup has none. A later attempt at a final visible benchmark was launched with a forced-hidden Windows startup flag and produced zero paints; it is excluded as visible-rendering evidence. Visual acceptance belongs to the owner, who requested no computer-use inspection.
+
+Actual administrator read-only firmware measurements: full status mean **1162.7ms** across8 samples; narrow observation mean **511.0ms** across4 samples. Narrow observation performs one EC mode read plus fingerprint/ownership checks instead of six EC capability/status reads. Helper CPU mean was 35.16ms, omitting delegated WMI-provider CPU. These small samples establish reduced observed latency, not a whole-system CPU, FPS, noise or temperature improvement.
+
+Both real probes made zero hardware writes. The candidate RPM byte remained0 despite operating fans; CPU/RPM calibration and reduced-speed thermal failover remain unresolved. New workload presets use only already-reviewed autonomous Auto/Boost and standard Windows power plans. Physical synchronization/light-bar/reboot checks are pending.
+
+## Final local binaries
+
+- `mcc.exe`: 854016 bytes; SHA-256 `76cb8a31678c0ffc75603a92cbc4181b885a8d4764627ea479c9d1f9baab33de`.
+- `mcc-ui.exe`: 669184 bytes; SHA-256 `a9e4a82445e776db4b0439ecae1e62db3f8c96e86826cf8033424b7d5c3b9be2`.
+
+Historical measurements follow; they describe earlier versions.
+
+---
+
 # Benchmark methodology
 
 ## Native v0.3 — simplified UI

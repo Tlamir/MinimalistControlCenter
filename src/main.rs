@@ -28,6 +28,28 @@ fn label<T: std::fmt::Display>(v: &mcc::Reading<T>) -> String {
 
 fn execute(command: Command) -> Result<(), String> {
     match command {
+        Command::Startup { enabled } => {
+            #[cfg(windows)]
+            {
+                let result = (|| {
+                    if let Some(on) = enabled {
+                        mcc::startup::set(on)?;
+                    }
+                    mcc::startup::enabled()
+                })();
+                match result {
+                    Ok(on) => pretty(
+                        &json!({"ok":true,"enabled":on,"scope":"current_user_logon","hardware_writes":0}),
+                    ),
+                    Err(e) => pretty(&json!({"ok":false,"error":e})),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = enabled;
+                Err("Startup configuration requires Windows".into())
+            }
+        }
         Command::Gpu => {
             #[cfg(windows)]
             {
@@ -148,6 +170,14 @@ fn hardware(action: cli::HardwareAction) -> Result<(), String> {
     {
         use cli::HardwareAction;
         match action {
+            HardwareAction::Observe => match mcc::hardware::observe() {
+                Ok(observation) => pretty(&json!({"ok":true,"observation":observation})),
+                Err(e) => pretty(&json!({"ok":false,"error":e})),
+            },
+            HardwareAction::CalibrationProbe => match mcc::hardware::calibration_probe() {
+                Ok(probe) => pretty(&json!({"ok":true,"probe":probe})),
+                Err(e) => pretty(&json!({"ok":false,"error":e})),
+            },
             HardwareAction::PauseOem | HardwareAction::ResumeOem => {
                 let r = mcc::hardware::handover(matches!(action, HardwareAction::ResumeOem));
                 pretty(&json!({"ok":r.is_ok(),"error":r.err()}))

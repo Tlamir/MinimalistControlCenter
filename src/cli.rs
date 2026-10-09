@@ -28,19 +28,24 @@ pub enum Command {
         plan: crate::settings::PowerPlan,
     },
     Gpu,
+    Startup {
+        enabled: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HardwareAction {
     Status,
+    CalibrationProbe,
+    Observe,
     Fan(crate::control::FanMode),
     Switch(crate::control::Switch, bool),
     PauseOem,
     ResumeOem,
 }
 
-pub const HELP: &str = "Minimalist Control Center 0.3\n\n\
-Usage:\n  mcc status [--json]\n  mcc schema [--json]\n  mcc watch [--seconds 10] [--interval-ms 1000] [--json]\n  mcc bench [--iterations 1000000]\n  mcc simulate\n  mcc hardware status\n  mcc hardware fan-auto|fan-boost\n  mcc hardware key-lock-on|key-lock-off|usb-on|usb-off|light-bar-on|light-bar-off\n  mcc lighting off|solid|breathing|rainbow|wave BRIGHTNESS SPEED RRGGBB DIRECTION\n  mcc power balanced|saver|performance\n  mcc-ui.exe [--connect]\n\n\
+pub const HELP: &str = "Minimalist Control Center 0.4\n\n\
+Usage:\n  mcc status [--json]\n  mcc schema [--json]\n  mcc watch [--seconds 10] [--interval-ms 1000] [--json]\n  mcc bench [--iterations 1000000]\n  mcc simulate\n  mcc hardware status\n  mcc hardware calibration-probe\n  mcc hardware fan-auto|fan-boost\n  mcc hardware key-lock-on|key-lock-off|usb-on|usb-off|light-bar-on|light-bar-off\n  mcc lighting off|solid|breathing|rainbow|wave BRIGHTNESS SPEED RRGGBB DIRECTION\n  mcc power balanced|saver|performance\n  mcc-ui.exe [--connect|--tray|--enable-startup|--disable-startup]\n\n\
 schema: opt-in WMI metadata only, bounded to 10 seconds. No vendor methods run.\n\
 watch: OS counters only; 1–3600 seconds, 250–60000 ms interval.\n\
 bench/simulate: synthetic in-memory policy only; never control real fans.\n\
@@ -57,10 +62,18 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "set" | "fan" | "boost" | "auto" | "control" | "write" | "install" | "service"
     ) {
         return Err(
-            "Hardware control and installation are unavailable in this read-only release.".into(),
+            "Unknown command. Use the documented typed hardware commands; raw control and driver installation are not supported.".into(),
         );
     }
     match name {
+        "startup" if args.len() == 2 => Ok(Command::Startup {
+            enabled: match args[1].as_str() {
+                "status" => None,
+                "on" => Some(true),
+                "off" => Some(false),
+                _ => return Err("Choose startup status, on, or off".into()),
+            },
+        }),
         "gpu" if args.len() == 1 => Ok(Command::Gpu),
         "hardware" if args.len() == 2 => {
             use crate::control::{FanMode, Switch};
@@ -68,6 +81,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 "pause-oem" => HardwareAction::PauseOem,
                 "resume-oem" => HardwareAction::ResumeOem,
                 "status" => HardwareAction::Status,
+                "calibration-probe" => HardwareAction::CalibrationProbe,
+                "observe" => HardwareAction::Observe,
                 "fan-auto" => HardwareAction::Fan(FanMode::Auto),
                 "fan-boost" => HardwareAction::Fan(FanMode::Boost),
                 "key-lock-on" => HardwareAction::Switch(Switch::WindowsKeyLock, true),
@@ -292,5 +307,39 @@ mod tests {
             p("lighting solid 4 2 00FF00 1"),
             Ok(Command::Lighting { .. })
         ));
+    }
+    #[test]
+    fn startup_and_observation_have_fixed_scope_and_reject_extra_arguments() {
+        assert_eq!(
+            p("startup on").unwrap(),
+            Command::Startup {
+                enabled: Some(true)
+            }
+        );
+        assert_eq!(
+            p("startup off").unwrap(),
+            Command::Startup {
+                enabled: Some(false)
+            }
+        );
+        assert_eq!(
+            p("startup status").unwrap(),
+            Command::Startup { enabled: None }
+        );
+        assert_eq!(
+            p("hardware observe").unwrap(),
+            Command::Hardware {
+                action: HardwareAction::Observe
+            }
+        );
+        for s in [
+            "startup",
+            "startup on --admin",
+            "startup path C:\\other.exe",
+            "hardware observe 1873",
+            "hardware calibration-probe --write",
+        ] {
+            assert!(p(s).is_err(), "{s}");
+        }
     }
 }

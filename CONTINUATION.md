@@ -1,3 +1,31 @@
+# v0.4 continuation — 10 October 2026
+
+Latest owner request: real minimum-noise/Office/Balanced/High/Turbo/custom fan controls with thermal override, Windows startup, and UI synchronization after the physical turbo button. Owner explicitly prefers doing visual/physical checks themselves; do not spend tokens on computer-use inspection.
+
+## Implemented in this update
+
+- Four clear workload cards: Office = firmware Auto + Windows Power Saver; Balanced = Auto + Balanced; High = Auto + High Performance; Turbo = firmware Boost, preserving the power plan. These are **not** the OEM Office table or calibrated speed levels. Removed misleading independent Quiet power-plan label.
+- Read-only fan-mode/ownership observation after explicit connection, with 2-second visible / 15-second hidden delays plus timer/helper latency. Read failures discard stale state and back off 30 seconds. Narrow observation cannot grant access; full status is used for recovery. Pending user actions remain pending when a background result arrives. No periodic fan writes, no fighting the physical button. Restore OEM stops monitoring.
+- Start with Windows: fixed current-user Run entry, quoted installed mcc-ui.exe path and --tray. No automatic privilege escalation or profile application. User still clicks Enable controls after login. Installer scripts/install-user.ps1 copies a versioned release into LocalAppData, verifies hashes, then registers startup. Reboot remains an owner check.
+- One real UI per privilege level; normal-to-admin handoff remains explicit. Old v0.3 uses a different class and must be exited by the owner. Explorer tray recreation supported. A file/directory lease prevents ordinary helper replacement while the elevated UI can launch it; tests cover blocked replacement and allowed helper execution.
+- Raw calibration-probe reads only a fixed list of known candidate addresses. It is NOT a Celsius/RPM calibration and never grants manual fan-write access.
+
+## Real read-only evidence this session
+
+Both administrator probes succeeded with zero hardware writes. Fan mode 0, ownership available; generation1922=0, support1858=2; active MyFan2 entries1859..1863 all60; defaults1929..1933 all0; candidate1086 varied69/67; candidate6148 remained0 despite operating fans. No valid RPM source established. Full status samples took about1.16s; optimized one-mode observation about0.51s. Helper CPU counters are quantized and omit WMI provider CPU; don't claim whole-system performance from them.
+
+## Still unfinished — do not claim complete OEM replacement
+
+Minimum-noise/fixed/custom fan speeds remain locked. OEM static mapping: fixed128..133 and table160 at1873, old table1859..1863; generation bit3 at1922. There is an application-side over-temperature event path. No proof of autonomous EC thermal override under low custom cooling or after process/OS failure. Independent CPU/GPU sensor correlation, RPM/scaling, autonomous thermal recovery and failure behavior are required before enabling reduced cooling. The owner has not yet answered the HWiNFO/readings question. Do not force the laptop to100°C to discover limits.
+
+Physical turbo display synchronization and light-bar ON/OFF need owner observation; automated tests are not that evidence. See docs/OWNER_CHECKS.md. No new real fan/lighting/power writes were made in this update. Startup registration is the intended non-hardware mutation.
+
+Local build now uses CARGO_TARGET_DIR=target/v04 because an old target/release/mcc-ui.exe was still running. Cargo fmt/clippy need unsandboxed project access in this session; normal sandbox returns filesystem access denied. GitHub credentials work outside network-restricted sandbox; do not ask for re-login based on sandbox auth failure.
+
+Final local checks: 93 release tests, strict Clippy/fmt, both PE audits pass. Installed in C:\Users\yigit\AppData\Local\MinimalistControlCenter\0.4.0; startup enable/off/off/on readback and actual tray/duplicate-instance smoke tests passed, leaving startup enabled. Test UI processes were stopped; the owner can launch the installed UI. See docs/BENCHMARKS.md and ignored reports/local/v04-delivery.md for publication status. Earlier v0.3 history follows.
+
+---
+
 # Continuation — native v0.3, 9 October 2026
 
 v0.3 checkpoint: public portable preview at https://github.com/Tlamir/MinimalistControlCenter/releases/tag/v0.3.0. Local tests: 69 library + 4 native worker + 6 integration = 79 passing. Strict Clippy passes; binary audits and measurements are recorded in docs/BENCHMARKS.md. All previously pending v0.2 CI runs completed successfully. Check the v0.3 CI outcome when continuing.
