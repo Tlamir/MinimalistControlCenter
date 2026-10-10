@@ -1,3 +1,11 @@
+# v0.5.1 active correction
+
+Read-only Win32_PnPEntity established this laptop is ITE048d:ce00 REV0002, usageff12/1 (FOUR ZONE). The v0.5.0 row candidate targeted ff02 and could not fix this laptop; reverted it. Actual root cause: generic Solid populated only palette slot1. OEM FourZone Single constructs four colors, circular=true, then writes slots1..4 and selects palette8. Implemented this exact bounded non-flash protocol for ff12 Solid only, retaining other variants/effects. Tests cover all zones, selector8, Off and variant isolation. Physical test pending.
+
+v0.5.0 was installed but not publicly released. User now has one Desktop/Minimalist Control Center.lnk, and version is shown in app. Native controls separation/regular preset menu/saved Custom combination implemented and tested. Installer now verifies real startup via StdRegProv and preserves prior profiles. Asked owner to exit app so shortcut can be updated to v0.5.1. Build target target/v041; final tests running. Do not claim lighting fixed physically until confirmed.
+
+---
+
 # Active v0.5 work — 10 October 2026
 
 Latest user resumed implementation and requested separate fan/performance controls while keeping regular presets and custom choices. This supersedes the earlier documentation-only request.

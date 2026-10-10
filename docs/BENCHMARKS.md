@@ -1,6 +1,6 @@
 # v0.5 validation — 10 October 2026
 
-100 local release tests passed:86 library,7 UI-worker,7 executable integration. Strict Clippy, formatting and both PE import audits pass. Tests include actual independent-backend dispatch (power never calls fan, fan never calls power), partial-application failures, custom combination persistence, complete126-LED row coverage, and the native UI's delayed-worker responsiveness/page-isolation self-test.
+100 local release tests passed:86 library,7 UI-worker,7 executable integration. Strict Clippy, formatting and both PE import audits pass. Tests include actual independent-backend dispatch (power never calls fan, fan never calls power), partial-application failures, custom combination persistence, all four Solid color slots and keyboard-variant isolation, and the native UI's delayed-worker responsiveness/page-isolation self-test.
 
 Installed hidden UI benchmark:10.076 seconds elapsed,78.125ms process CPU,15,339,520-byte working set (~14.63MiB),zero paints. Includes startup; excludes firmware helpers/WMI provider and proves no thermal/FPS improvement. This is one quantized sample, not a claim of speedup. Self-test-only fields are not exercised in benchmark mode; native responsiveness was checked by the separate executable integration test.
 

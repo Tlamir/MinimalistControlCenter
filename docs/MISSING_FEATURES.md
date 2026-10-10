@@ -7,7 +7,7 @@ Updated 10 October 2026 against v0.4.2. This is a checklist only; recording an i
 - Implemented separate Adaptive/Turbo fan buttons and Power Saver/Balanced/Performance buttons; each preserves the other setting.
 - Kept regular Office/Balanced/High/Turbo combinations in a presets menu.
 - Added Save current as Custom / Apply saved Custom for a supported fan + Windows plan combination. This is not a custom fan curve.
-- Implemented explicit six-row Solid lighting transfers for the first-generation per-key collection. Physical acceptance is pending; the keyboard defect below is not yet closed.
+- v0.5.1 identifies this laptop as four-zone (ff12) and updates all four Solid color slots. Physical acceptance is pending; the keyboard defect below is not yet closed. The unrelated per-key row candidate was reverted.
 
 ## Priority 1 — reported problems and requested everyday behavior
 

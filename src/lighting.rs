@@ -67,11 +67,32 @@ pub fn reports(c: &Lighting) -> Result<Vec<[u8; 9]>, String> {
         ],
     ])
 }
-/// Mode feature followed by six explicitly addressed rows of 21 LEDs.
-/// The reviewed first-generation OEM row protocol uses planar B, G, R channels.
+/// Four-zone firmware needs all four palette slots and multi-color selection,
+/// even when the requested result is one uniform color. Per-key devices retain
+/// their separate protocol; never send per-key rows to a four-zone collection.
+pub fn reports_for_collection(c: &Lighting, usage_page: u16) -> Result<Vec<[u8; 9]>, String> {
+    if !matches!(usage_page, 0xff02 | 0xff12) {
+        return Err("Unsupported keyboard collection".into());
+    }
+    let mut base = reports(c)?;
+    if usage_page == 0xff12 && c.effect == Effect::Solid {
+        let [r, g, b] = c.rgb;
+        let mut all: Vec<_> = (1..=4)
+            .map(|zone| [0, 20, 0, zone, r, g, b, 0, 0])
+            .collect();
+        let mut effect = base.pop().ok_or("Missing effect report")?;
+        effect[6] = 8;
+        all.push(effect);
+        Ok(all)
+    } else {
+        Ok(base)
+    }
+}
+
+/// Mode feature, transfer-start feature, then one sixteen-key output packet.
 pub struct SolidTransfer {
     pub effect: [u8; 9],
-    pub row_select: [[u8; 9]; 6],
+    pub picture: [u8; 9],
     pub pixels: [u8; 65],
 }
 pub fn solid_output(c: &Lighting) -> Result<SolidTransfer, String> {
@@ -80,9 +101,9 @@ pub fn solid_output(c: &Lighting) -> Result<SolidTransfer, String> {
         return Err("Solid transfer requires the solid effect".into());
     }
     let mut pixels = [0u8; 65];
-    pixels[2..23].fill(c.rgb[2]);
-    pixels[23..44].fill(c.rgb[1]);
-    pixels[44..65].fill(c.rgb[0]);
+    for slot in pixels[1..].chunks_exact_mut(4) {
+        slot[1..].copy_from_slice(&c.rgb);
+    }
     Ok(SolidTransfer {
         effect: [
             0,
@@ -95,7 +116,7 @@ pub fn solid_output(c: &Lighting) -> Result<SolidTransfer, String> {
             0,
             0,
         ],
-        row_select: std::array::from_fn(|row| [0, 22, 0, row as u8, 0, 0, 0, 0, 0]),
+        picture: [0, 18, 0, 0, 8, 0, 0, 0, 0],
         pixels,
     })
 }
@@ -104,22 +125,32 @@ pub fn solid_output(c: &Lighting) -> Result<SolidTransfer, String> {
 mod tests {
     use super::*;
     #[test]
-    fn solid_addresses_every_row_and_all_126_leds_without_flash_save() {
-        let transfer = solid_output(&Lighting {
+    fn four_zone_solid_updates_every_zone_and_selects_zone_palette_without_flash_save() {
+        let c = Lighting {
             rgb: [19, 47, 203],
             ..Default::default()
-        })
-        .unwrap();
-        assert_eq!(transfer.effect[3], 51);
-        assert_eq!(transfer.effect[8], 0);
-        for (row, select) in transfer.row_select.iter().enumerate() {
-            assert_eq!(*select, [0, 22, 0, row as u8, 0, 0, 0, 0, 0]);
+        };
+        let output = reports_for_collection(&c, 0xff12).unwrap();
+        assert_eq!(output.len(), 5);
+        for (i, r) in output[..4].iter().enumerate() {
+            assert_eq!(*r, [0, 20, 0, (i + 1) as u8, 19, 47, 203, 0, 0]);
         }
-        assert_eq!(&transfer.pixels[..2], &[0, 0]);
-        assert_eq!(&transfer.pixels[2..23], &[203; 21]);
-        assert_eq!(&transfer.pixels[23..44], &[47; 21]);
-        assert_eq!(&transfer.pixels[44..65], &[19; 21]);
-        assert_eq!(transfer.row_select.len() * 21, 126);
+        assert_eq!(output[4][1..4], [8, 2, 1]);
+        assert_eq!(output[4][6], 8);
+        assert_eq!(output[4][8], 0);
+        assert_eq!(
+            reports_for_collection(&c, 0xff02).unwrap(),
+            reports(&c).unwrap()
+        );
+        assert!(reports_for_collection(&c, 0xff03).is_err());
+        let off = Lighting {
+            effect: Effect::Off,
+            ..c
+        };
+        assert_eq!(
+            reports_for_collection(&off, 0xff12).unwrap(),
+            reports(&off).unwrap()
+        );
     }
     #[test]
     fn off_is_one_firmware_report() {

@@ -1,6 +1,10 @@
-# v0.5 Solid lighting row transfer
+# v0.5.1 — verified keyboard variant and Solid protocol correction
 
-For the already-supported first-generation per-key HID collection (usage page ff02), Solid now uses explicit row addressing rather than the picture-stream path. Local OEM static analysis exposes six rows of 21 LEDs: select row0..5 using feature opcode0x16, then a 65-byte output report with report-ID/padding followed by21 blue,21 green,21 red bytes. Mode remains volatile user mode51; nonvolatile save remains zero. Uniform color makes row orientation irrelevant. Other effects/collections are unchanged. Automated tests verify126 LED slots and all row selectors; physical acceptance is pending. No proprietary implementation is distributed.
+Read-only Windows PnP inventory on the target reports USB VID048d/PIDce00 revision0002, with control collection usage pageff12 / usage1. This is the OEM four-zone variant, not the ff02 per-key variant.
+
+Local OEM protocol inspection: four-zone Solid loads color slots1,2,3,4 using feature opcode0x14, then effect opcode0x08 with palette selector8. The previous implementation loaded only slot1 and selected1, matching the owner's left-side-only observation. The corrected uniform-color command fills all four slots. All reports retain nonvolatile-save0. Off remains unchanged. Regression tests cover every zone, mode selection, and variant isolation.
+
+An earlier six-row transfer candidate applied only to ff02 and could not fix this machine. That candidate was reverted; the original per-key picture path is unchanged. Physical acceptance of the four-zone fix is pending.
 
 ---
 

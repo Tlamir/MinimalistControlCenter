@@ -10,7 +10,7 @@ v0.4.2 resolves the physical executable path for elevation and startup, and inst
 
 Keep **mcc-ui.exe** and **mcc.exe** together. Open mcc-ui.exe. Startup reads OS counters and applies nothing.
 
-For a stable per-user installation with tray startup, extract the release and run `powershell -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1`. This creates/updates a single **Minimalist Control Center** desktop shortcut, preserves the previous installed version's preferences when present, and copies the version into `%USERPROFILE%\Applications\MinimalistControlCenter\0.5.0`, verifies both binary copies, and registers the quoted UI path in your Windows sign-in startup. It does not need administrator access. To disable startup, use Settings or `mcc.exe startup off`. A later release installs beside the old one before replacing the startup entry; different builds cannot overwrite an existing version through this installer.
+For a stable per-user installation with tray startup, extract the release and run `powershell -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1`. This creates/updates a single **Minimalist Control Center** desktop shortcut, preserves the previous installed version's preferences when present, and copies the version into `%USERPROFILE%\Applications\MinimalistControlCenter\0.5.1`, verifies both binary copies, and registers the quoted UI path in your Windows sign-in startup. It does not need administrator access. To disable startup, use Settings or `mcc.exe startup off`. A later release installs beside the old one before replacing the startup entry; different builds cannot overwrite an existing version through this installer.
 
 The installer registers startup through Windows' registry provider and verifies it there, avoiding packaged-terminal registry redirection. The in-app startup toggle still uses native registry APIs and needs further handling when the app inherits a packaged launch context. A real restart remains an owner check.
 
@@ -27,7 +27,7 @@ The physical turbo button is not periodically overridden. **Refresh**, F5, or re
 
 ## Reliability
 
-Solid lighting on the first-generation per-key HID collection now addresses six rows of 21 LEDs explicitly instead of sending an unaddressed picture stream. Protocol coverage has a regression test; physical confirmation of the reported one-sided lighting defect is pending. This change is limited to Solid on usage page ff02; it does not claim all effects or keyboard variants are fixed.
+The target laptop identifies as ITE048d:ce00 revision0002, usage pageff12 (four-zone). Solid now writes the chosen color to all four zones and selects the firmware's multi-zone palette. Previously only zone1 was updated. Off remains a single firmware command. Tests cover all four addressed slots, variant separation and zero nonvolatile save; physical confirmation is pending. Per-key keyboard transfers remain unchanged.
 
 Light-bar and Windows-key commands wait for pending toggle pulses to be consumed, re-read current state, submit one pulse and poll acknowledgement with a bounded read loop. A delayed success is never blindly toggled back. After failed hardware actions, the GUI refreshes actual state: successful readback keeps controls usable; unavailable state disables writes. Failed writes are never automatically replayed.
 

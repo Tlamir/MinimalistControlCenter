@@ -300,9 +300,10 @@ pub fn keyboard(config: &Lighting) -> Result<(), String> {
             .send_feature_report(&transfer.effect)
             .map_err(|e| e.to_string())?;
         std::thread::sleep(Duration::from_millis(2));
-        for row in &transfer.row_select {
-            device.send_feature_report(row).map_err(|e| e.to_string())?;
-            std::thread::sleep(Duration::from_millis(2));
+        device
+            .send_feature_report(&transfer.picture)
+            .map_err(|e| e.to_string())?;
+        for _ in 0..8 {
             if device.write(&transfer.pixels).map_err(|e| e.to_string())? != transfer.pixels.len() {
                 return Err("Short keyboard output transfer".into());
             }
@@ -310,7 +311,7 @@ pub fn keyboard(config: &Lighting) -> Result<(), String> {
         }
         return Ok(());
     }
-    for report in lighting::reports(config)? {
+    for report in lighting::reports_for_collection(config, devices[0].usage_page())? {
         device
             .send_feature_report(&report)
             .map_err(|e| e.to_string())?;
