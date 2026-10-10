@@ -4,7 +4,7 @@ Native Rust/Win32 controls for **MONSTER TULPAR T5 V17.1 / BIOS N.1.06 / i7-8750
 
 **v0.4 adds automatic fan-state synchronization, clearer workload presets, and optional Windows logon startup.** Cooling, Lighting and Settings remain native pages. Full feature parity and extended thermal validation remain unfinished.
 
-v0.4.2 resolves the physical executable path for elevation and startup, and installs outside package-redirected AppData folders. Earlier installations created from a packaged terminal could report Windows error 3 when enabling controls. End-to-end owner verification remains required. Automatic light-bar-off after restart is requested but not yet supported.
+v0.4.2 resolves the physical executable path for elevation and startup, and installs outside package-redirected AppData folders. Earlier installations created from a packaged terminal could report Windows error 3 when enabling controls. The owner confirmed Enable controls and physical turbo-button/UI synchronization on the target laptop. Automatic light-bar-off after restart is requested but not yet supported.
 
 ## Run
 
