@@ -1,3 +1,13 @@
+# v0.4.2 validation — 10 October 2026
+
+95 release tests passed (83 library, 5 native-worker, 7 executable integration). Strict Clippy, formatting and both PE import audits passed. New regression coverage verifies physical executable path resolution and distinguishes cancellation from other Windows launch errors.
+
+Actual UAC isolation: v0.4.1 at its apparent LocalAppData path failed with error 3 both while running and after exit. GetFinalPathNameByHandle exposed package filesystem redirection. Launching those exact installed bytes through the resolved package-cache path succeeded, exit 0; its elevated UI self-test reported hardware_accessed=false and worker_responsive=true. This test changed no firmware settings. It is functional verification, not a new performance comparison.
+
+v0.4.2 installed at %USERPROFILE%/Applications/MinimalistControlCenter/0.4.2. Startup readback passed. Owner Enable controls verification is pending. Historical v0.4 measurements below must not be read as evidence that its original installation supported UAC or reboot startup.
+
+---
+
 # v0.4 validation — 10 October 2026
 
 Final local release suite: **93 passed** (81 library, 5 native-worker, 7 executable integration tests). Strict Clippy and formatting pass. Both final PE import audits pass. Native self-test verifies Segoe UI resolution, page isolation, disabled startup hardware controls and message processing during a delayed worker. Helper leases reject replacement/rename but still allow actual CLI execution.

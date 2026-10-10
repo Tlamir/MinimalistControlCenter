@@ -1,3 +1,25 @@
+# Active v0.4.2 correction — 10 October 2026
+
+Owner's screenshot overrides the earlier mistaken Controls ready reply: v0.4.1 failed with Windows error 3. Root cause identified by GetFinalPathNameByHandle: apparent AppData/Local/MinimalistControlCenter install was redirected into the Codex package LocalCache/Local folder. Shell runas against the apparent path failed, while the same bytes in the build folder elevated successfully. Exiting the UI did not fix it, ruling out the directory lease hypothesis; retained original lease behavior.
+
+Fix: resolve current executable through canonicalize (GetFinalPathNameByHandle) before ShellExecuteEx, remove only local-drive extended prefix while retaining UTF-16, supply physical parent working directory. Startup registration also uses the physical path. Installer now uses %USERPROFILE%/Applications/MinimalistControlCenter/<version>, outside the redirected AppData directory. Error dialog preserves Windows error codes; only 1223 is cancellation. COM initialization and synchronous launch retained.
+
+Build target remains target/v041 for v0.4.2. 95 release tests, strict Clippy and PE audits pass. Installed in C:/Users/yigit/Applications/MinimalistControlCenter/0.4.2 and startup readback passes. Owner verification and GitHub publication pending at this checkpoint. Exact old v0.4.1 installed bytes elevated successfully through their physical package-cache path (read-only self-test), confirming the path-redirection diagnosis. Automatic light-bar-off on restart remains requested and unfinished. Older notes below are historical, not proof of a working v0.4.1 handoff.
+
+---
+
+# Active v0.4.1 work — 10 October 2026
+
+Owner reported Enable controls says administrator access canceled. v0.4.0 collapsed every ShellExecute failure into that message, so actual cause is not established. Changed to ShellExecuteExW with COM initialization, synchronous shell completion, Unicode-native executable path, exact GetLastError diagnostics and a full error dialog. Do not claim the UAC problem is resolved until owner verifies the installed build.
+
+Owner also requires the light bar to be off after Windows restart. NOT implemented yet. Current HKCU tray startup is deliberately unelevated and cannot write ACPI. A protected, narrowly scoped privileged startup component and persistent desired lighting state are needed for automatic sign-in application; do not create a highest-privilege scheduled task pointing to user-writable LocalAppData binaries. Before-Windows lighting persistence is not established. No firmware nonvolatile writes are authorized by an inferred protocol.
+
+InstallServGM.exe is present in the original OEM installation and is not installed or called by our app. Original GamingCenter service remains Automatic; observed Stopped. No matching scheduled task/startup command was found in the scoped read-only checks. Exact OEM installer startup trigger remains unknown.
+
+Build target for this patch: target/v041. v0.4.0 public prerelease is already published. Pending installation, owner UAC test, publishing and persistent lighting work. Older checkpoint follows.
+
+---
+
 # v0.4 continuation — 10 October 2026
 
 Latest owner request: real minimum-noise/Office/Balanced/High/Turbo/custom fan controls with thermal override, Windows startup, and UI synchronization after the physical turbo button. Owner explicitly prefers doing visual/physical checks themselves; do not spend tokens on computer-use inspection.

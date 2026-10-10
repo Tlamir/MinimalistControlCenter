@@ -74,7 +74,8 @@ mod native {
         if !path.is_file() {
             return Err("Keep mcc-ui.exe alongside mcc.exe before enabling startup".into());
         }
-        super::command(&path.to_string_lossy())
+        let physical = crate::elevation::physical_shell_path(&path).map_err(|e| e.to_string())?;
+        super::command(&physical.to_string_lossy())
     }
     pub fn enabled() -> Result<bool, String> {
         let key = open(false)?;

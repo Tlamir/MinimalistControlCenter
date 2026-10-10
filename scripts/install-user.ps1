@@ -9,9 +9,12 @@ foreach ($name in @('mcc.exe', 'mcc-ui.exe')) {
 }
 $version = (& (Join-Path $Source 'mcc.exe') --version).Trim()
 if ($LASTEXITCODE -ne 0 -or $version -notmatch '^mcc ([0-9]+\.[0-9]+\.[0-9]+)$') { throw 'Cannot identify release version' }
-$folder = Join-Path $env:LOCALAPPDATA ('MinimalistControlCenter\' + $Matches[1])
+# AppData writes made by packaged terminals can be transparently redirected to
+# their package cache, invisible to the UAC broker at the apparent path. Use a
+# normal user-owned location outside Windows' package-virtualized known folders.
+$folder = Join-Path $env:USERPROFILE ('Applications\MinimalistControlCenter\' + $Matches[1])
 $folder = [IO.Path]::GetFullPath($folder)
-$parent = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'MinimalistControlCenter'))
+$parent = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE 'Applications\MinimalistControlCenter'))
 if (-not $folder.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected installation path' }
 foreach ($name in @('mcc.exe','mcc-ui.exe')) {
     $existing = Join-Path $folder $name

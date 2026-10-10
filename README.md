@@ -4,11 +4,13 @@ Native Rust/Win32 controls for **MONSTER TULPAR T5 V17.1 / BIOS N.1.06 / i7-8750
 
 **v0.4 adds automatic fan-state synchronization, clearer workload presets, and optional Windows logon startup.** Cooling, Lighting and Settings remain native pages. Full feature parity and extended thermal validation remain unfinished.
 
+v0.4.2 resolves the physical executable path for elevation and startup, and installs outside package-redirected AppData folders. Earlier installations created from a packaged terminal could report Windows error 3 when enabling controls. End-to-end owner verification remains required. Automatic light-bar-off after restart is requested but not yet supported.
+
 ## Run
 
 Keep **mcc-ui.exe** and **mcc.exe** together. Open mcc-ui.exe. Startup reads OS counters and applies nothing.
 
-For a stable per-user installation with tray startup, extract the release and run `powershell -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1`. This copies the version into `%LOCALAPPDATA%\MinimalistControlCenter\0.4.0`, verifies both binary copies, and registers the quoted UI path in your Windows sign-in startup. It does not need administrator access. To disable startup, use Settings or `mcc.exe startup off`. A later release installs beside the old one before replacing the startup entry; different builds cannot overwrite an existing version through this installer.
+For a stable per-user installation with tray startup, extract the release and run `powershell -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1`. This copies the version into `%USERPROFILE%\Applications\MinimalistControlCenter\0.4.2`, verifies both binary copies, and registers the quoted UI path in your Windows sign-in startup. It does not need administrator access. To disable startup, use Settings or `mcc.exe startup off`. A later release installs beside the old one before replacing the startup entry; different builds cannot overwrite an existing version through this installer.
 
 1. Exit Monster Kontrol Merkezi, including its tray icon.
 2. Click **Enable controls** and accept the Windows administrator prompt. The app reads capabilities and pauses the reviewed OEM launcher if needed. Its startup configuration stays unchanged. If the original controller is using a different preset, set automatic cooling there before exiting it.

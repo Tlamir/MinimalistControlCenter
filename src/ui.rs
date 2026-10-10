@@ -843,31 +843,30 @@ impl App {
             self.submit(Job::Connect);
             return;
         }
-        if let Ok(path) = std::env::current_exe() {
-            // SAFETY: Fixed verb, current absolute executable and fixed argument; no shell interpolation.
-            let r = unsafe {
-                ShellExecuteW(
-                    self.hwnd,
-                    wide("runas").as_ptr(),
-                    wide(&path.to_string_lossy()).as_ptr(),
-                    wide("--connect").as_ptr(),
-                    ptr::null(),
-                    SW_SHOWNORMAL,
-                )
-            };
-            if r as usize > 32 {
-                // SAFETY: Close our old UI after successful elevated launch.
+        match mcc::elevation::launch(self.hwnd) {
+            Ok(()) => {
+                // SAFETY: Close our old UI only after the synchronous elevated launch succeeds.
                 unsafe {
                     PostMessageW(self.hwnd, WM_CLOSE, 1, 0);
                 }
-            } else {
-                self.message =
-                    "Administrator access was canceled. Click Enable controls when ready.".into();
+            }
+            Err(error) => {
+                self.message = error;
                 self.error = true;
                 self.invalidate();
+                // SAFETY: Show the complete launch diagnostic; the short footer may clip it.
+                unsafe {
+                    MessageBoxW(
+                        self.hwnd,
+                        wide(&self.message).as_ptr(),
+                        wide("Enable controls").as_ptr(),
+                        MB_OK | MB_ICONERROR,
+                    );
+                }
             }
         }
     }
+
     fn choose(&self, id: u16, items: &[&str], current: usize) -> Option<usize> {
         let mut r = RECT::default();
         // SAFETY: Live child HWND, scoped popup menu and literal labels copied by Windows.

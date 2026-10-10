@@ -1,3 +1,9 @@
+# Administrator handoff retest
+
+In the updated build, select Enable controls. Accept the Windows prompt if shown. Report whether Controls ready appears; if a dialog reports failure, include its Windows error number. Only error 1223 means Windows reported consent declined. Other errors must not be described as cancellation.
+
+Light-bar off automatically after restart is requested but not implemented. Ordinary tray startup currently applies no lighting state.
+
 # Owner checks for v0.4
 
 The app's automated tests use fake hardware. The following observations must come from the laptop owner. No stress test or intentional overheating is needed for these checks.
