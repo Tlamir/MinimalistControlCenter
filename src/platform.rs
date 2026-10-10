@@ -13,6 +13,7 @@ pub struct Identity {
 
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
+    pub cpu_clock_mhz: Reading<u32>,
     pub memory_used_percent: Reading<u32>,
     pub physical_memory_bytes: Reading<u64>,
     pub ac_connected: Reading<bool>,
@@ -228,6 +229,12 @@ mod os {
     }
 
     pub fn snapshot() -> Snapshot {
+        snapshot_inner(true)
+    }
+    pub fn dashboard_snapshot() -> Snapshot {
+        snapshot_inner(false)
+    }
+    fn snapshot_inner(include_process: bool) -> Snapshot {
         let mut mem = MemoryStatus {
             length: size_of::<MemoryStatus>() as u32,
             ..Default::default()
@@ -245,6 +252,7 @@ mod os {
         // SAFETY: Three valid writable FILETIME outputs.
         let cpu_ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } != 0;
         Snapshot {
+            cpu_clock_mhz: cpu_clock(),
             memory_used_percent: if memory_ok && mem.load <= 100 {
                 Reading::available(mem.load)
             } else {
@@ -277,8 +285,54 @@ mod os {
             cpu_temperature_c: Reading::unavailable("CPU temperature protocol not verified"),
             gpu_temperature_c: Reading::unavailable("GPU telemetry backend not enabled"),
             fan_rpm: Reading::unavailable("EC fan telemetry protocol not verified"),
-            process: metrics(),
+            process: if include_process {
+                metrics()
+            } else {
+                Reading::unavailable("Not requested")
+            },
         }
+    }
+
+    // Windows reports a throttle-adjusted clock, not instantaneous per-core turbo frequency.
+    pub fn cpu_clock() -> Reading<u32> {
+        #[repr(C)]
+        #[derive(Clone, Copy, Default)]
+        struct ProcessorPower {
+            number: u32,
+            maximum: u32,
+            current: u32,
+            limit: u32,
+            max_idle: u32,
+            current_idle: u32,
+        }
+        use windows_sys::Win32::System::{
+            Power::{CallNtPowerInformation, ProcessorInformation},
+            Threading::GetActiveProcessorCount,
+        };
+        // SAFETY: Read-only count for the current processor group. Bounded stack buffer below.
+        let count = unsafe { GetActiveProcessorCount(0) } as usize;
+        if !(1..=64).contains(&count) {
+            return Reading::unavailable("Processor count unavailable");
+        }
+        let mut data = [ProcessorPower::default(); 64];
+        // SAFETY: Documented read-only information class, correct C layout and full group buffer.
+        let code = unsafe {
+            CallNtPowerInformation(
+                ProcessorInformation,
+                std::ptr::null(),
+                0,
+                data.as_mut_ptr().cast(),
+                (count * size_of::<ProcessorPower>()) as u32,
+            )
+        };
+        if code != 0
+            || data[..count]
+                .iter()
+                .any(|p| !(1..=20_000).contains(&p.current))
+        {
+            return Reading::unavailable("Windows clock unavailable");
+        }
+        Reading::available(data[..count].iter().map(|p| p.current).sum::<u32>() / count as u32)
     }
 
     pub fn powershell_path() -> Result<PathBuf, String> {
@@ -312,6 +366,7 @@ mod os {
     }
     pub fn snapshot() -> Snapshot {
         Snapshot {
+            cpu_clock_mhz: Reading::unavailable("Windows only"),
             memory_used_percent: Reading::unavailable("Windows only"),
             physical_memory_bytes: Reading::unavailable("Windows only"),
             ac_connected: Reading::unavailable("Windows only"),
@@ -323,11 +378,14 @@ mod os {
             process: metrics(),
         }
     }
+    pub fn dashboard_snapshot() -> Snapshot {
+        snapshot()
+    }
     pub fn powershell_path() -> Result<std::path::PathBuf, String> {
         Err("WMI discovery requires Windows".into())
     }
 }
-pub use os::{identity, metrics, powershell_path, snapshot};
+pub use os::{dashboard_snapshot, identity, metrics, powershell_path, snapshot};
 
 #[cfg(test)]
 mod tests {

@@ -1,10 +1,24 @@
-# Administrator handoff retest
+# Owner confirmation — 10 October 2026
 
-In the updated build, select Enable controls. Accept the Windows prompt if shown. Report whether Controls ready appears; if a dialog reports failure, include its Windows error number. Only error 1223 means Windows reported consent declined. Other errors must not be described as cancellation.
+The owner tested a normal restart on v0.6.2 and confirmed that automatic startup works and the light bar is physically off after sign-in. That check is complete. Battery sign-in, physical keyboard effects, sleep/resume and uninstall still need separate observations.
 
-Light-bar off automatically after restart is requested but not implemented. Ordinary tray startup currently applies no lighting state.
+The v0.7 UI uses a dynamic model header, direct preset buttons, shorter copy, an embedded icon and on-demand GPU readings. Office remains Auto + Power Saver; it does not implement an OEM low-speed fan table.
 
-# Owner checks for v0.4
+Historical checks below are preserved as the checklist used for v0.6.
+
+Installed v0.6.2 has passed file/permission checks, startup off/on and desktop/task launch without another UAC prompt. Firmware reports the light bar off. The remaining observations below require a normal restart or checking the physical hardware.
+
+# Owner checks for v0.6
+
+1. Exit old Minimalist instances and the Monster GUI. Extract the full release, run Install.cmd, and approve Windows' installation prompt once. The desktop shortcut should open the installed app without another administrator prompt.
+2. At your next normal restart, wait about ten seconds after sign-in. Confirm exactly one Minimalist tray instance starts, controls are ready, and the light bar is physically off. No fan or keyboard preset should be recalled. A tray warning means the connection/write/readback failed; open Lighting and report the actual message instead of repeatedly toggling.
+3. Confirm startup still works when signing in on battery. Toggle Start with Windows off, exit using the header button, and reopen from the desktop shortcut without another prompt. Re-enable startup and confirm its display follows the real task state.
+4. Confirm Monster's GUI does not reopen automatically, while existing touchpad/OSD behavior remains available. Its exact launcher entry is restored by uninstall; installed OEM files and service startup type are preserved.
+5. Check the three redesigned pages, header Hide/Exit buttons and complete status/error Details. Then check Solid colors across all four zones, one light-bar on/off cycle, and physical Turbo-button synchronization. Automated reports cannot establish the keyboard's actual appearance or cooling response.
+
+No forced restart, stress test, or deliberate overheating is required. Extra fan curves remain unavailable pending the independent firmware protection described in [fan support](FAN_SUPPORT.md).
+
+# Historical owner checks for v0.4
 
 The app's automated tests use fake hardware. The following observations must come from the laptop owner. No stress test or intentional overheating is needed for these checks.
 

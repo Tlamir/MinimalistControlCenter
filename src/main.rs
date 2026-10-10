@@ -31,15 +31,13 @@ fn execute(command: Command) -> Result<(), String> {
         Command::Startup { enabled } => {
             #[cfg(windows)]
             {
-                let result = (|| {
-                    if let Some(on) = enabled {
-                        mcc::startup::set(on)?;
-                    }
-                    mcc::startup::enabled()
-                })();
+                let result = match enabled {
+                    Some(on) => mcc::startup::set(on),
+                    None => mcc::startup::status(),
+                };
                 match result {
-                    Ok(on) => pretty(
-                        &json!({"ok":true,"enabled":on,"scope":"current_user_logon","hardware_writes":0}),
+                    Ok(status) => pretty(
+                        &json!({"ok":true,"startup":status,"scope":"current_user_logon","hardware_writes":0}),
                     ),
                     Err(e) => pretty(&json!({"ok":false,"error":e})),
                 }
@@ -53,8 +51,10 @@ fn execute(command: Command) -> Result<(), String> {
         Command::Gpu => {
             #[cfg(windows)]
             {
-                match mcc::gpu::temperature() {
-                    Ok(c) => pretty(&json!({"ok":true,"gpu_temperature_c":c})),
+                match mcc::gpu::sensors() {
+                    Ok(s) => {
+                        pretty(&json!({"ok":true,"gpu_temperature_c":s.temperature_c,"sensors":s}))
+                    }
                     Err(e) => pretty(&json!({"ok":false,"error":e})),
                 }
             }

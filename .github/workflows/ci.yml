@@ -17,6 +17,10 @@ jobs:
       - run: cargo test --all-targets --locked
       - run: cargo test --all-targets --release --locked
       - run: cargo build --release --locked
+      - name: Startup fake-provider regression checks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: powershell -NoProfile -File tests/startup.ps1
       - name: Audit Windows executable imports
         if: runner.os == 'Windows'
         run: |
@@ -31,6 +35,12 @@ jobs:
           & target/release/mcc.exe fan 0 --force
           if ($LASTEXITCODE -ne 2) { throw 'Control was not rejected' }
           exit 0
+      - name: Package verified installer release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sysroot = (& rustc --print sysroot).Trim()
+          python scripts/package.py --runtime-notices "$sysroot/share/doc/rust/COPYRIGHT-library.html"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: runner.os == 'Windows'
         with:
@@ -40,4 +50,6 @@ jobs:
             target/release/mcc-ui.exe
             LICENSE
             THIRD_PARTY_NOTICES.md
+            target/packages/*.zip
+            target/packages/*.sha256
           retention-days: 14

@@ -44,14 +44,20 @@ pub enum HardwareAction {
     ResumeOem,
 }
 
-pub const HELP: &str = "Minimalist Control Center 0.4\n\n\
+pub const HELP: &str = concat!(
+    "Minimalist Control Center ",
+    env!("CARGO_PKG_VERSION"),
+    "\n\n\
 Usage:\n  mcc status [--json]\n  mcc schema [--json]\n  mcc watch [--seconds 10] [--interval-ms 1000] [--json]\n  mcc bench [--iterations 1000000]\n  mcc simulate\n  mcc hardware status\n  mcc hardware calibration-probe\n  mcc hardware fan-auto|fan-boost\n  mcc hardware key-lock-on|key-lock-off|usb-on|usb-off|light-bar-on|light-bar-off\n  mcc lighting off|solid|breathing|rainbow|wave BRIGHTNESS SPEED RRGGBB DIRECTION\n  mcc power balanced|saver|performance\n  mcc-ui.exe [--connect|--tray|--enable-startup|--disable-startup]\n\n\
 schema: opt-in WMI metadata only, bounded to 10 seconds. No vendor methods run.\n\
 watch: OS counters only; 1–3600 seconds, 250–60000 ms interval.\n\
 bench/simulate: synthetic in-memory policy only; never control real fans.\n\
 Hardware commands are explicit, fingerprint/capability/ownership gated.\n\
 Fan modes are firmware automatic or boost. No fixed speeds, raw writes, drivers or voltage changes.\n\
-Lighting brightness/speed: 0–4; direction: 1–4. Profiles never apply on startup.\n";
+Lighting brightness/speed: 0–4; direction: 1–4. Cooling/keyboard profiles never apply on startup.\n\
+startup status|on|off: installed elevated task or portable monitor-only logon entry.\n\
+Installed logon startup enables verified controls and requests light-bar off.\n"
+);
 
 pub fn parse(args: &[String]) -> Result<Command, String> {
     let Some(name) = args.first().map(String::as_str) else {

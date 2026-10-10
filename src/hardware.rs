@@ -156,7 +156,7 @@ fn check_competing_controller() -> Result<(), String> {
     let c = WMIConnection::with_namespace_path("root\\CIMV2")
         .map_err(|e| format!("Cannot check OEM ownership: {e}"))?;
     let processes: Vec<Process> = c
-        .raw_query("SELECT Name FROM Win32_Process")
+        .raw_query("SELECT Name FROM Win32_Process WHERE Name='GamingCenter.exe' OR Name='OEMServiceWinApp.exe' OR Name='ControlCenter.exe' OR Name='GamingCenterU.exe'")
         .map_err(|e| format!("Cannot check running controllers: {e}"))?;
     for p in processes {
         if matches!(
@@ -170,7 +170,7 @@ fn check_competing_controller() -> Result<(), String> {
         }
     }
     let services: Vec<Service> = c
-        .raw_query("SELECT Name, State, PathName FROM Win32_Service")
+        .raw_query("SELECT Name, State, PathName FROM Win32_Service WHERE State='Running'")
         .map_err(|e| format!("Cannot check OEM services: {e}"))?;
     for s in services {
         let path = s.path.unwrap_or_default().to_ascii_lowercase();

@@ -37,6 +37,9 @@ const QUIET: u16 = 105;
 const STARTUP: u16 = 124;
 const CUSTOM: u16 = 125;
 const REGULAR: u16 = 126;
+const PRESET_DAILY: u16 = 132;
+const PRESET_HIGH: u16 = 133;
+const PRESET_BOOST: u16 = 134;
 const SAVE_CUSTOM: u16 = 127;
 const APPLY_CUSTOM: u16 = 128;
 const BALANCED: u16 = 106;
@@ -48,6 +51,9 @@ const KEY: u16 = 111;
 const USB: u16 = 113;
 const BAR: u16 = 115;
 const QUIT: u16 = 120;
+const HIDE: u16 = 129;
+const DETAILS: u16 = 130;
+const SHOW: u16 = 131;
 const GPU_TEMP: u16 = 121;
 const RESTORE: u16 = 123;
 const COOLING: u16 = 201;
@@ -90,6 +96,7 @@ fn caption(hwnd: HWND, t: &str) {
 #[derive(Clone)]
 enum Job {
     Connect,
+    StartupConnect,
     Status,
     Poll,
     ReconnectPoll,
@@ -98,6 +105,7 @@ enum Job {
     Power(PowerPlan),
     Combination(FanMode, PowerPlan),
     Startup(bool),
+    StartupStatus,
     Switch(Switch, bool),
     Light(Lighting),
     Gpu,
@@ -114,7 +122,11 @@ struct Completed {
     lighting: Option<Lighting>,
     power: Option<PowerPlan>,
     power_refreshed: bool,
+    gpu: Option<mcc::gpu::Sensors>,
     stop_monitor: bool,
+    startup: Option<mcc::startup::Status>,
+    startup_refreshed: bool,
+    startup_attempt: bool,
 }
 impl Completed {
     fn message(message: impl Into<String>) -> Self {
@@ -128,7 +140,11 @@ impl Completed {
             lighting: None,
             power: None,
             power_refreshed: false,
+            gpu: None,
             stop_monitor: false,
+            startup: None,
+            startup_refreshed: false,
+            startup_attempt: false,
         }
     }
 }
@@ -139,7 +155,12 @@ fn call(args: &[String]) -> Result<serde_json::Value, String> {
         .with_file_name("mcc.exe");
     let mut cmd = std::process::Command::new(path);
     cmd.args(args).creation_flags(0x08000000);
-    let bytes = mcc::process::run(&mut cmd, Duration::from_secs(5))
+    let timeout = if args.first().is_some_and(|a| a == "startup") {
+        15
+    } else {
+        5
+    };
+    let bytes = mcc::process::run(&mut cmd, Duration::from_secs(timeout))
         .map_err(|e| format!("Request stopped: {e:?}. Checking current settings…"))?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     if v["ok"] != true {
@@ -164,7 +185,7 @@ fn fan_args(f: FanMode) -> Vec<String> {
 }
 fn operation(job: &Job) -> Result<Completed, String> {
     let message = match job {
-        Job::Connect => {
+        Job::Connect | Job::StartupConnect => {
             let s = hardware_status()?;
             if !s.writes_allowed
                 && s.ownership_reason
@@ -173,7 +194,14 @@ fn operation(job: &Job) -> Result<Completed, String> {
             {
                 call(&["hardware".into(), "pause-oem".into()])?;
             }
-            "Controls enabled. Choose a workload preset; fan state stays synchronized."
+            if matches!(job, Job::StartupConnect) {
+                // Desired-state command rechecks ownership/capability and is idempotent.
+                // Do not retry a timed-out write or restore a fan/keyboard profile.
+                call(&["hardware".into(), "light-bar-off".into()])?;
+                "Connected · light bar off."
+            } else {
+                "Connected."
+            }
         }
         Job::Status | Job::ReconnectPoll => "Settings refreshed.",
         Job::Poll => {
@@ -195,13 +223,25 @@ fn operation(job: &Job) -> Result<Completed, String> {
             }
             return Ok(r);
         }
-        Job::Startup(on) => {
-            mcc::startup::set(*on)?;
-            if *on {
-                "Starts in the tray when you sign in. Hardware control still requires Enable controls."
+        Job::Startup(_) | Job::StartupStatus => {
+            let action = match job {
+                Job::Startup(true) => "on",
+                Job::Startup(false) => "off",
+                _ => "status",
+            };
+            let v = call(&["startup".into(), action.into()])?;
+            let startup: mcc::startup::Status =
+                serde_json::from_value(v["startup"].clone()).map_err(|e| e.to_string())?;
+            let mut r = Completed::message(if !startup.enabled {
+                "Windows startup is off."
+            } else if startup.managed {
+                "Windows startup on."
             } else {
-                "Windows startup disabled."
-            }
+                "Portable startup on."
+            });
+            r.startup = Some(startup);
+            r.startup_refreshed = true;
+            return Ok(r);
         }
         Job::Fan(mode) => {
             mcc::presets::apply_combination(
@@ -210,7 +250,7 @@ fn operation(job: &Job) -> Result<Completed, String> {
                 |f| call(&fan_args(f)).map(|_| ()),
                 mcc::desktop::power,
             )?;
-            "Fan cooling updated. Windows performance setting was preserved."
+            "Fan mode updated."
         }
         Job::Power(plan) => {
             mcc::presets::apply_combination(
@@ -219,7 +259,7 @@ fn operation(job: &Job) -> Result<Completed, String> {
                 |f| call(&fan_args(f)).map(|_| ()),
                 mcc::desktop::power,
             )?;
-            "Windows performance updated. Fan mode was preserved."
+            "Power plan updated."
         }
         Job::Combination(fan, power) => {
             mcc::presets::apply_combination(
@@ -228,38 +268,15 @@ fn operation(job: &Job) -> Result<Completed, String> {
                 |f| call(&fan_args(f)).map(|_| ()),
                 mcc::desktop::power,
             )?;
-            "Custom fan/performance combination applied. Lighting was preserved."
+            "Custom preset applied."
         }
         Job::Preset(p) => {
-            mcc::presets::apply(
-                *p,
-                |f| call(&fan_args(f)).map(|_| ()),
-                |power| {
-                    call(&[
-                        "power".into(),
-                        match power {
-                            PowerPlan::PowerSaver => "saver",
-                            PowerPlan::Balanced => "balanced",
-                            PowerPlan::HighPerformance => "performance",
-                        }
-                        .into(),
-                    ])
-                    .map(|_| ())
-                },
-            )?;
+            mcc::presets::apply(*p, |f| call(&fan_args(f)).map(|_| ()), mcc::desktop::power)?;
             match p {
-                Preset::Office => {
-                    "Office: adaptive fans + Windows Power Saver. Less CPU power; fan speed still follows heat."
-                }
-                Preset::Balanced => {
-                    "Balanced: adaptive fans + Windows Balanced. Cooling follows workload."
-                }
-                Preset::High => {
-                    "High: adaptive fans + Windows High Performance. May generate more heat and noise."
-                }
-                Preset::Turbo => {
-                    "Turbo: firmware cooling boost. Pressing the laptop button updates this app automatically."
-                }
+                Preset::Office => "Office preset applied.",
+                Preset::Balanced => "Balanced preset applied.",
+                Preset::High => "Performance preset applied.",
+                Preset::Turbo => "Boost preset applied.",
             }
         }
         Job::Switch(s, on) => {
@@ -321,10 +338,9 @@ fn operation(job: &Job) -> Result<Completed, String> {
         }
         Job::Gpu => {
             let v = call(&["gpu".into()])?;
-            return Ok(Completed::message(format!(
-                "GPU: {} °C · one sample. Continuous GPU polling is off.",
-                v["gpu_temperature_c"]
-            )));
+            let mut r = Completed::message("GPU sample updated.");
+            r.gpu = Some(serde_json::from_value(v["sensors"].clone()).map_err(|e| e.to_string())?);
+            return Ok(r);
         }
         Job::Restore => {
             call(&fan_args(FanMode::Auto))?;
@@ -352,6 +368,7 @@ fn worker_with(
     let needs_status = matches!(
         job,
         Job::Connect
+            | Job::StartupConnect
             | Job::Status
             | Job::ReconnectPoll
             | Job::Preset(_)
@@ -365,7 +382,12 @@ fn worker_with(
         r.error = true;
         r
     });
-    r.passive = matches!(job, Job::Poll | Job::ReconnectPoll);
+    r.startup_refreshed |= matches!(job, Job::Startup(_) | Job::StartupStatus);
+    r.startup_attempt = matches!(job, Job::StartupConnect);
+    if matches!(job, Job::StartupStatus) {
+        r.passive = true;
+    }
+    r.passive |= matches!(job, Job::Poll | Job::ReconnectPoll);
     if matches!(job, Job::Poll) && r.error && r.observation.is_none() {
         r.status_failed = true;
     }
@@ -374,6 +396,13 @@ fn worker_with(
     if needs_status {
         match status() {
             Ok(s) => {
+                if matches!(job, Job::StartupConnect)
+                    && s.capabilities.light_bar_enabled
+                    && !r.error
+                {
+                    r.message = "Startup connected, but the light bar still reports on. Check Lighting before retrying.".into();
+                    r.error = true;
+                }
                 if !s.writes_allowed && !r.error && !matches!(job, Job::Restore) {
                     r.message = s
                         .ownership_reason
@@ -409,6 +438,7 @@ fn demo_caps() -> mcc::control::Capabilities {
 fn demo_worker(job: Job, c: &mut mcc::control::Capabilities, fail: &mut bool) -> Completed {
     let mut r = Completed::message("Preview only · no hardware changes.");
     match job {
+        Job::StartupConnect => c.light_bar_enabled = false,
         Job::Fan(f) => c.fan_mode_raw = f.byte(),
         Job::Power(p) => r.power = Some(p),
         Job::Combination(f, p) => {
@@ -438,6 +468,10 @@ fn demo_worker(job: Job, c: &mut mcc::control::Capabilities, fail: &mut bool) ->
         Job::ResponsivenessTest => {
             std::thread::sleep(Duration::from_millis(500));
             r.message = "Synthetic worker completed.".into();
+        }
+        Job::Light(c) => {
+            r.lighting = Some(c);
+            r.message = "Preview only · keyboard selection simulated.".into();
         }
         _ => {}
     }
@@ -480,15 +514,17 @@ struct App {
     monitor: Monitor,
     clock: Instant,
     visible: bool,
-    startup: bool,
+    startup: Option<mcc::startup::Status>,
     message: String,
     error: bool,
     lighting: Lighting,
+    last_lighting_sent: Option<Lighting>,
     power: Option<PowerPlan>,
     settings: Settings,
     previous_cpu: Option<mcc::CpuTimes>,
     stats: [String; 3],
-    own_memory: String,
+    cpu_clock: String,
+    gpu: Option<(mcc::gpu::Sensors, Instant)>,
     tray: NOTIFYICONDATAW,
     benchmark: Option<Benchmark>,
     test_completed: bool,
@@ -504,6 +540,89 @@ struct App {
 }
 thread_local! {static APP:RefCell<Option<App>>=const {RefCell::new(None)};}
 impl App {
+    /// Render only our own drawing and controls into a bitmap. No screen capture or hardware calls.
+    fn render_preview(&self, path: &std::path::Path) -> Result<(), String> {
+        let width = self.px(720);
+        let height = self.px(708);
+        let mut info = BITMAPINFO::default();
+        info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        let mut bits = ptr::null_mut();
+        // SAFETY: Fixed bounded dimensions, owned memory DC and bitmap. Restore selections before
+        // releasing objects; copy pixels only after GDI has finished drawing into the DIB.
+        let pixels = unsafe {
+            let root = GetDC(self.hwnd);
+            let dc = CreateCompatibleDC(root);
+            ReleaseDC(self.hwnd, root);
+            if dc.is_null() {
+                return Err("Could not create preview DC".into());
+            }
+            let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, ptr::null_mut(), 0);
+            if bitmap.is_null() || bits.is_null() {
+                DeleteDC(dc);
+                return Err("Could not create preview bitmap".into());
+            }
+            let old = SelectObject(dc, bitmap);
+            self.paint(dc);
+            for b in &self.buttons {
+                let style = GetWindowLongW(b.hwnd, GWL_STYLE) as u32;
+                if style & WS_VISIBLE == 0 {
+                    continue;
+                }
+                let mut r = RECT::default();
+                GetWindowRect(b.hwnd, &mut r);
+                let mut origin = POINT {
+                    x: r.left,
+                    y: r.top,
+                };
+                ScreenToClient(self.hwnd, &mut origin);
+                let saved = SaveDC(dc);
+                SetViewportOrgEx(dc, origin.x, origin.y, ptr::null_mut());
+                self.draw_button(&DRAWITEMSTRUCT {
+                    CtlID: b.id as u32,
+                    hwndItem: b.hwnd,
+                    hDC: dc,
+                    itemState: if style & WS_DISABLED != 0 {
+                        ODS_DISABLED
+                    } else {
+                        0
+                    },
+                    rcItem: RECT {
+                        left: 0,
+                        top: 0,
+                        right: r.right - r.left,
+                        bottom: r.bottom - r.top,
+                    },
+                    ..Default::default()
+                });
+                RestoreDC(dc, saved);
+            }
+            GdiFlush();
+            let pixels =
+                std::slice::from_raw_parts(bits as *const u8, (width * height * 4) as usize)
+                    .to_vec();
+            SelectObject(dc, old);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
+            pixels
+        };
+        let mut bmp = Vec::with_capacity(54 + pixels.len());
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&((54 + pixels.len()) as u32).to_le_bytes());
+        bmp.extend_from_slice(&[0; 4]);
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&width.to_le_bytes());
+        bmp.extend_from_slice(&height.to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&32u16.to_le_bytes());
+        bmp.extend_from_slice(&[0; 24]);
+        bmp.extend_from_slice(&pixels);
+        std::fs::write(path, bmp).map_err(|e| e.to_string())
+    }
     fn font_faces(&self) -> Vec<String> {
         // SAFETY: Our window's DC is released after use; selected font restored each time.
         unsafe {
@@ -545,6 +664,9 @@ impl App {
                 if matches!(
                     b.id,
                     AUTO | BOOST
+                        | PRESET_DAILY
+                        | PRESET_HIGH
+                        | PRESET_BOOST
                         | REGULAR
                         | SAVE_CUSTOM
                         | APPLY_CUSTOM
@@ -643,7 +765,20 @@ impl App {
         );
         caption(
             self.handle(STARTUP),
-            if self.startup { "On" } else { "Off" },
+            match self.startup {
+                Some(s) if s.enabled => "On",
+                Some(_) => "Off",
+                None => "Check",
+            },
+        );
+        caption(
+            self.handle(GPU_TEMP),
+            &self
+                .gpu
+                .as_ref()
+                .and_then(|(s, _)| s.clock_mhz)
+                .map(|v| format!("{v} MHz"))
+                .unwrap_or("Read GPU".into()),
         );
         for (id, s) in [
             (KEY, Switch::WindowsKeyLock),
@@ -700,7 +835,8 @@ impl App {
                 USB => self.session.ready() && c.is_some_and(|c| c.usb_charging),
                 BAR => self.session.ready() && c.is_some_and(|c| c.light_bar),
                 QUIET | BALANCED | PERFORMANCE => !self.session.busy,
-                REGULAR | SAVE_CUSTOM => self.session.ready(),
+                REGULAR | PRESET_DAILY | PRESET_HIGH | SAVE_CUSTOM => self.session.ready(),
+                PRESET_BOOST => self.session.ready() && c.is_some_and(|c| c.boost),
                 APPLY_CUSTOM => {
                     self.session.ready()
                         && self.settings.profiles.iter().any(|p| p.name == "Custom")
@@ -731,14 +867,27 @@ impl App {
         if self.session.busy {
             return;
         }
+        let startup_check = matches!(job, Job::StartupStatus);
+        let gpu_sample = matches!(job, Job::Gpu);
         if self.tx.try_send(job).is_ok() {
+            if gpu_sample {
+                self.gpu = None;
+            }
             self.session.busy = true;
-            self.message = "Applying…".into();
+            self.message = if startup_check {
+                "Checking Windows startup…"
+            } else {
+                "Applying…"
+            }
+            .into();
             self.error = false;
             self.refresh_controls();
         }
     }
     fn poll(&mut self) {
+        if !self.visible {
+            return;
+        }
         if self
             .monitor
             .due(self.clock.elapsed().as_millis() as u64, self.session.busy)
@@ -763,6 +912,22 @@ impl App {
             let old_caps = self.session.capabilities.clone();
             let old_allowed = self.session.allowed;
             let old_power = self.power;
+            if let Some(gpu) = r.gpu.filter(|_| self.visible) {
+                self.gpu = Some((gpu, Instant::now()));
+            }
+            if r.startup_attempt && r.error && self.tray.cbSize != 0 {
+                let mut tray = self.tray;
+                tray.uFlags = NIF_INFO;
+                tray.dwInfoFlags = NIIF_WARNING;
+                let title = wide("Minimalist needs attention");
+                tray.szInfoTitle[..title.len()].copy_from_slice(&title);
+                let detail = wide(&r.message.chars().take(120).collect::<String>());
+                tray.szInfo[..detail.len()].copy_from_slice(&detail);
+                // SAFETY: Bounded UTF16 strings, initialized tray ID and callback window.
+                unsafe {
+                    Shell_NotifyIconW(NIM_MODIFY, &tray);
+                }
+            }
             if r.stop_monitor {
                 self.monitor.enabled = false;
                 // SAFETY: Cancel only our read-only observation timer.
@@ -777,10 +942,12 @@ impl App {
                 self.monitor.enabled = true;
                 // SAFETY: UI-owned timer; activated only after explicit hardware connection.
                 unsafe {
-                    SetTimer(self.hwnd, 3, 1000, None);
+                    if self.visible {
+                        SetTimer(self.hwnd, 3, 1000, None);
+                    }
                 }
             }
-            if r.passive {
+            if r.passive && !r.startup_refreshed {
                 self.monitor.completed(
                     self.clock.elapsed().as_millis() as u64,
                     self.visible,
@@ -803,20 +970,23 @@ impl App {
             } else {
                 self.session.complete(fresh, r.status_failed);
             }
-            if !r.passive || r.error {
+            if !r.passive || r.error || r.startup_refreshed {
                 self.message = r.message;
                 self.error = r.error;
             } else if !self.session.busy && old_caps != self.session.capabilities {
-                self.message = "Laptop controls changed. Display updated from firmware.".into();
+                self.message = "Settings updated.".into();
                 self.error = false;
             }
-            if !self.demo {
-                self.startup = mcc::startup::enabled().unwrap_or(false);
+            if r.startup_refreshed {
+                self.startup = r.startup;
+                // A passive startup check still occupies the worker queue.
+                self.session.busy = false;
             }
             if r.power_refreshed || r.power.is_some() {
                 self.power = r.power;
             }
             if let Some(c) = r.lighting {
+                self.last_lighting_sent = Some(c.clone());
                 if let Some(p) = self
                     .settings
                     .profiles
@@ -833,6 +1003,7 @@ impl App {
                 }
             }
             if !r.passive
+                || r.startup_refreshed
                 || r.error
                 || old_caps != self.session.capabilities
                 || old_allowed != self.session.allowed
@@ -844,7 +1015,15 @@ impl App {
     }
     fn dashboard(&mut self) {
         let begin = Instant::now();
-        let s = mcc::platform::snapshot();
+        if self
+            .gpu
+            .as_ref()
+            .is_some_and(|(_, t)| t.elapsed() >= Duration::from_secs(30))
+        {
+            self.gpu = None;
+            self.refresh_controls();
+        }
+        let s = mcc::platform::dashboard_snapshot();
         self.stats[0] = s
             .system_cpu_times
             .value
@@ -874,12 +1053,12 @@ impl App {
                 )
             })
             .unwrap_or("—".into());
-        self.own_memory = s
-            .process
+        self.cpu_clock = s
+            .cpu_clock_mhz
             .value
-            .map(|v| format!("{:.1} MiB", v.working_set_bytes as f64 / 1048576.))
+            .map(|v| format!("{:.2} GHz · OS", v as f64 / 1000.))
             .unwrap_or("—".into());
-        let r = self.rect(32, 576, 656, 74);
+        let r = self.rect(32, 555, 656, 96);
         // SAFETY: Stack RECT copied by Windows; no background erase.
         unsafe {
             InvalidateRect(self.hwnd, &r, 0);
@@ -959,6 +1138,9 @@ impl App {
                     _ => Page::Cooling,
                 };
                 self.refresh_controls();
+                if id == SETTINGS && !self.demo && self.benchmark.is_none() && !self.session.busy {
+                    self.submit(Job::StartupStatus);
+                }
             }
             CONNECT => self.connect(),
             AUTO | BOOST => {
@@ -979,27 +1161,14 @@ impl App {
                     }));
                 }
             }
-            REGULAR => {
+            REGULAR | PRESET_DAILY | PRESET_HIGH | PRESET_BOOST => {
                 if self.session.ready() {
-                    if let Some(i) = self.choose(
-                        id,
-                        &[
-                            "Office: Adaptive + Power Saver",
-                            "Balanced: Adaptive + Balanced",
-                            "High: Adaptive + Performance",
-                            "Turbo: Boost, keep performance",
-                        ],
-                        1,
-                    ) {
-                        self.submit(Job::Preset(
-                            [
-                                Preset::Office,
-                                Preset::Balanced,
-                                Preset::High,
-                                Preset::Turbo,
-                            ][i],
-                        ));
-                    }
+                    self.submit(Job::Preset(match id {
+                        REGULAR => Preset::Office,
+                        PRESET_HIGH => Preset::High,
+                        PRESET_BOOST => Preset::Turbo,
+                        _ => Preset::Balanced,
+                    }));
                 }
             }
             SAVE_CUSTOM => {
@@ -1056,16 +1225,21 @@ impl App {
             }
             STARTUP => {
                 if self.demo {
-                    self.startup = !self.startup;
+                    self.startup = Some(mcc::startup::Status {
+                        enabled: !self.startup.is_some_and(|s| s.enabled),
+                        managed: false,
+                    });
                     self.refresh_controls();
+                } else if self.startup.is_none() {
+                    self.submit(Job::StartupStatus);
                 } else {
-                    self.submit(Job::Startup(!self.startup));
+                    self.submit(Job::Startup(!self.startup.is_some_and(|s| s.enabled)));
                 }
             }
             CUSTOM => {
-                self.message = "Minimum-noise / custom fan speeds need verified sensors and firmware overheat recovery. Manual low speeds remain locked; workload presets never pin fans low.".into();
+                self.message = "This laptop currently supports verified Automatic and Boost modes. Custom curves need reliable temperature readings and proven overheat recovery if the app stops. They remain unavailable until that protection is verified.".into();
                 self.error = false;
-                self.invalidate();
+                self.command(DETAILS);
             }
             KEY | USB | BAR => {
                 let s = match id {
@@ -1197,15 +1371,42 @@ impl App {
                     PostMessageW(self.hwnd, WM_CLOSE, 1, 0);
                 }
             }
+            HIDE => self.hide(),
+            SHOW => self.show(),
+            DETAILS => {
+                // SAFETY: Show the complete status as plain text in an owned native dialog.
+                unsafe {
+                    MessageBoxW(
+                        self.hwnd,
+                        wide(&self.message).as_ptr(),
+                        wide(if self.error {
+                            "Minimalist · Action failed"
+                        } else {
+                            "Minimalist · Status"
+                        })
+                        .as_ptr(),
+                        MB_OK
+                            | if self.error {
+                                MB_ICONERROR
+                            } else {
+                                MB_ICONINFORMATION
+                            },
+                    );
+                }
+                self.invalidate();
+            }
             _ => {}
         }
     }
     fn hide(&mut self) {
         self.visible = false;
+        self.gpu = None;
+        caption(self.handle(GPU_TEMP), "Read GPU");
         // SAFETY: UI-owned HWND and timer; hidden dashboard polling stops.
         unsafe {
             ShowWindow(self.hwnd, SW_HIDE);
             KillTimer(self.hwnd, 1);
+            KillTimer(self.hwnd, 3);
         }
     }
     fn show(&mut self) {
@@ -1216,12 +1417,16 @@ impl App {
             ShowWindow(self.hwnd, SW_RESTORE);
             SetForegroundWindow(self.hwnd);
             SetTimer(self.hwnd, 1, 1000, None);
+            if self.monitor.enabled {
+                SetTimer(self.hwnd, 3, 1000, None);
+            }
         }
         self.previous_cpu = None;
         if !self.demo {
             self.power = mcc::desktop::active_power();
         }
         self.dashboard();
+        self.refresh_controls();
         if self.session.capabilities.is_some() {
             self.submit(Job::Status);
         }
@@ -1288,171 +1493,148 @@ impl App {
     }
     fn paint(&self, dc: HDC) {
         self.round(dc, self.rect(0, 0, 720, 708), BG, BG, 0);
-        self.label(dc, "Minimalist", 32, 26, 420, 34, 2, INK);
+        self.draw_text(
+            dc,
+            &self.model,
+            self.rect(32, 24, 656, 34),
+            2,
+            INK,
+            DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
         self.label(
             dc,
-            &format!("{} · v{}", self.model, env!("CARGO_PKG_VERSION")),
+            &format!("Minimalist Control Center · {}", env!("CARGO_PKG_VERSION")),
             32,
-            65,
-            420,
+            71,
+            300,
             24,
             3,
             MUTED,
         );
-        self.label(
-            dc,
-            if self.demo {
-                "Preview · simulated hardware"
-            } else if self.session.allowed {
-                "Controls ready"
-            } else {
-                "Monitor only"
-            },
-            482,
-            75,
-            206,
-            24,
-            3,
-            if self.demo { MUTED } else { GREEN },
-        );
         match self.page {
             Page::Cooling => {
-                self.label(dc, "Cooling & performance", 32, 171, 640, 34, 2, INK);
-                self.round(dc, self.rect(32, 219, 656, 186), WHITE, BORDER, 16);
-                self.label(dc, "FAN COOLING", 52, 233, 250, 24, 3, MUTED);
+                self.label(dc, "Quick presets", 32, 182, 400, 24, 1, INK);
+                self.round(dc, self.rect(32, 328, 656, 163), WHITE, BORDER, 16);
+                self.label(dc, "Fans", 52, 342, 400, 24, 1, INK);
+                self.label(dc, "Windows power", 52, 417, 616, 24, 1, INK);
+            }
+            Page::Lighting => {
+                self.label(dc, "Lighting", 32, 169, 380, 34, 2, INK);
+
+                self.round(dc, self.rect(32, 238, 656, 263), WHITE, BORDER, 16);
+                self.label(dc, "Keyboard", 52, 252, 320, 30, 1, INK);
                 self.label(
                     dc,
-                    mcc::session::fan_label(
-                        self.session.capabilities.as_ref().map(|c| c.fan_mode_raw),
-                    ),
-                    412,
-                    233,
-                    256,
-                    24,
-                    1,
-                    GREEN,
-                );
-                self.label(
-                    dc,
-                    "WINDOWS PERFORMANCE · independent of fan mode",
-                    52,
-                    315,
-                    616,
-                    24,
-                    3,
-                    MUTED,
-                );
-                self.label(dc, "Presets & your combination", 32, 420, 656, 24, 1, INK);
-                self.label(
-                    dc,
-                    "Choose fan + performance above, then save your combination.",
-                    32,
-                    477,
-                    656,
+                    if self.last_lighting_sent.as_ref() == Some(&self.lighting) {
+                        "Sent"
+                    } else {
+                        "Pending"
+                    },
+                    200,
+                    257,
+                    280,
                     22,
                     3,
                     MUTED,
                 );
-            }
-            Page::Lighting => {
-                self.label(dc, "Lighting", 32, 171, 380, 34, 2, INK);
-                self.round(dc, self.rect(32, 219, 656, 282), WHITE, BORDER, 16);
-                self.label(dc, "Keyboard", 52, 238, 320, 30, 1, INK);
-                self.label(dc, "Effect", 52, 282, 280, 22, 3, MUTED);
-                self.label(dc, "Brightness", 364, 282, 280, 22, 3, MUTED);
-                self.label(dc, "Color", 52, 353, 280, 22, 3, MUTED);
+                self.label(dc, "Effect", 52, 292, 280, 22, 3, MUTED);
+                self.label(dc, "Brightness", 364, 292, 280, 22, 3, MUTED);
+                self.label(dc, "Color", 52, 363, 280, 22, 3, MUTED);
                 if matches!(
                     self.lighting.effect,
                     Effect::Breathing | Effect::Rainbow | Effect::Wave
                 ) {
-                    self.label(dc, "Animation speed", 52, 426, 280, 22, 3, MUTED);
-                    self.label(dc, "Direction", 364, 426, 280, 22, 3, MUTED);
-                } else {
-                    self.label(
-                        dc,
-                        "The keyboard runs effects itself. No background animation loop.",
-                        52,
-                        442,
-                        590,
-                        34,
-                        3,
-                        MUTED,
-                    );
+                    self.label(dc, "Animation speed", 52, 436, 280, 22, 3, MUTED);
+                    self.label(dc, "Direction", 364, 436, 280, 22, 3, MUTED);
                 }
-                self.round(dc, self.rect(32, 513, 656, 50), WHITE, BORDER, 14);
-                self.label(dc, "Light bar", 52, 527, 380, 26, 0, INK);
+                self.round(dc, self.rect(32, 497, 656, 54), WHITE, BORDER, 14);
+                self.label(dc, "Light bar", 52, 505, 380, 24, 1, INK);
+                self.label(dc, "Off at sign-in", 52, 530, 460, 18, 3, MUTED);
             }
             Page::Settings => {
-                self.label(dc, "Settings", 32, 171, 380, 34, 2, INK);
-                self.round(dc, self.rect(32, 219, 656, 161), WHITE, BORDER, 16);
-                self.label(dc, "Lock Windows key", 52, 241, 460, 28, 1, INK);
+                self.label(dc, "Settings", 32, 169, 380, 34, 2, INK);
+
+                self.round(dc, self.rect(32, 238, 656, 140), WHITE, BORDER, 16);
+                self.label(dc, "Lock Windows key", 52, 251, 460, 28, 1, INK);
+
+                self.label(dc, "USB charging in hibernation", 52, 316, 460, 28, 1, INK);
+                self.label(dc, "Supported USB port", 52, 343, 460, 25, 3, MUTED);
+                self.round(dc, self.rect(32, 390, 656, 87), WHITE, BORDER, 16);
+                self.label(dc, "Start with Windows", 52, 402, 420, 28, 1, INK);
                 self.label(
                     dc,
-                    "Prevent accidental presses while playing.",
+                    if self.startup.is_some_and(|s| s.managed) {
+                        "Start in tray · light bar off"
+                    } else {
+                        "Install to enable startup controls"
+                    },
                     52,
-                    270,
-                    460,
-                    25,
-                    3,
-                    MUTED,
-                );
-                self.label(dc, "USB charging while asleep", 52, 313, 460, 28, 1, INK);
-                self.label(
-                    dc,
-                    "Keep the supported USB port powered when hibernating.",
-                    52,
-                    342,
-                    460,
-                    25,
-                    3,
-                    MUTED,
-                );
-                self.round(dc, self.rect(32, 388, 656, 158), WHITE, BORDER, 16);
-                self.label(dc, "Start with Windows", 52, 399, 420, 28, 1, INK);
-                self.label(
-                    dc,
-                    "Opens in the tray. Enable controls requests permission after sign-in.",
-                    52,
-                    431,
+                    441,
                     616,
                     20,
                     3,
                     MUTED,
                 );
-                self.label(
-                    dc,
-                    &format!(
-                        "v{} · {} app memory · Close the window to keep it in the tray.",
-                        env!("CARGO_PKG_VERSION"),
-                        self.own_memory
-                    ),
-                    32,
-                    550,
-                    656,
-                    22,
-                    3,
-                    MUTED,
-                );
+                self.label(dc, "Windows tools", 32, 491, 656, 24, 1, INK);
             }
         }
         self.paint_stats(dc);
-        self.label(
+        self.draw_text(
             dc,
-            &self.message,
-            32,
-            663,
-            656,
-            40,
+            self.message.lines().next().unwrap_or(""),
+            self.rect(32, 663, 554, 28),
             3,
             if self.error { ERROR } else { MUTED },
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
         );
     }
     fn paint_stats(&self, dc: HDC) {
-        self.round(dc, self.rect(32, 579, 656, 66), WHITE, BORDER, 14);
-        for (i, name) in ["CPU usage", "Memory used", "Battery"].iter().enumerate() {
-            let x = 52 + i as i32 * 212;
-            self.label(dc, &self.stats[i], x, 590, 195, 28, 1, INK);
-            self.label(dc, name, x, 621, 195, 20, 3, MUTED);
+        self.round(dc, self.rect(32, 558, 656, 90), WHITE, BORDER, 14);
+        let sample = self
+            .gpu
+            .as_ref()
+            .filter(|(_, time)| time.elapsed() < Duration::from_secs(30))
+            .map(|(s, _)| s);
+        let gpu_clock = sample
+            .and_then(|s| s.clock_mhz)
+            .map(|v| format!("{v} MHz"))
+            .unwrap_or("—".into());
+        let gpu_temp = sample
+            .and_then(|s| s.temperature_c)
+            .map(|v| format!("{v} °C · sample"))
+            .unwrap_or("On demand".into());
+        let gpu_fan = sample
+            .and_then(|s| s.fan_rpm)
+            .map(|v| format!("{v} RPM"))
+            .unwrap_or("—".into());
+        let values = [
+            &self.stats[0],
+            &gpu_clock,
+            &gpu_fan,
+            &self.stats[1],
+            &self.stats[2],
+        ];
+        let notes = [
+            self.cpu_clock.as_str(),
+            gpu_temp.as_str(),
+            if sample.is_some_and(|s| s.fan_rpm.is_some()) {
+                "Sample"
+            } else {
+                "Unavailable"
+            },
+            "",
+            "",
+        ];
+        for (i, name) in ["CPU", "GPU", "GPU fan", "Memory", "Battery"]
+            .iter()
+            .enumerate()
+        {
+            let x = 48 + i as i32 * 130;
+            if i != 1 {
+                self.label(dc, values[i], x, 568, 123, 26, 1, INK);
+            }
+            self.label(dc, notes[i], x, 595, 123, 20, 3, MUTED);
+            self.label(dc, name, x, 622, 123, 20, 3, MUTED);
         }
     }
     fn draw_button(&self, d: &DRAWITEMSTRUCT) {
@@ -1477,7 +1659,7 @@ impl App {
             QUIET => self.power == Some(PowerPlan::PowerSaver),
             BALANCED => self.power == Some(PowerPlan::Balanced),
             PERFORMANCE => self.power == Some(PowerPlan::HighPerformance),
-            STARTUP => self.startup,
+            STARTUP => self.startup.is_some_and(|s| s.enabled),
             KEY => self
                 .session
                 .capabilities
@@ -1493,6 +1675,18 @@ impl App {
                 .capabilities
                 .as_ref()
                 .is_some_and(|c| c.light_bar_enabled),
+            REGULAR | PRESET_DAILY | PRESET_HIGH | PRESET_BOOST => {
+                let p = Preset::observed(
+                    self.session.capabilities.as_ref().map(|c| c.fan_mode_raw),
+                    self.power,
+                );
+                p == Some(match id {
+                    REGULAR => Preset::Office,
+                    PRESET_HIGH => Preset::High,
+                    PRESET_BOOST => Preset::Turbo,
+                    _ => Preset::Balanced,
+                })
+            }
             _ => false,
         };
         // SAFETY: Windows supplies valid DC/RECT; save and restore isolate drawing state.
@@ -1556,6 +1750,26 @@ impl App {
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                 );
             }
+        } else if matches!(id, REGULAR | PRESET_DAILY | PRESET_HIGH | PRESET_BOOST) {
+            let mut title = r;
+            title.top += self.px(10);
+            title.bottom = title.top + self.px(25);
+            self.draw_text(d.hDC, &s, title, 1, color, DT_CENTER | DT_SINGLELINE);
+            let mut detail = r;
+            detail.top += self.px(39);
+            self.draw_text(
+                d.hDC,
+                match id {
+                    REGULAR => "Auto · Saver",
+                    PRESET_HIGH => "Auto · Performance",
+                    PRESET_BOOST => "Boost · Keep power",
+                    _ => "Auto · Balanced",
+                },
+                detail,
+                3,
+                MUTED,
+                DT_CENTER | DT_SINGLELINE,
+            );
         } else {
             let choice = matches!(id, EFFECT | BRIGHTNESS | SPEED | DIRECTION);
             if choice {
@@ -1566,7 +1780,13 @@ impl App {
                 d.hDC,
                 &s,
                 r,
-                if nav || primary { 1 } else { 0 },
+                if nav || primary {
+                    1
+                } else if id == HIDE || id == CUSTOM {
+                    3
+                } else {
+                    0
+                },
                 color,
                 (if choice { DT_LEFT } else { DT_CENTER }) | DT_VCENTER | DT_SINGLELINE,
             );
@@ -1615,12 +1835,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
         match msg {
             WM_SHOWWINDOW if w != 0 => { a.visible=true; a.monitor.wake();
                 // SAFETY: UI-owned dashboard timer when another instance restores this window.
-                unsafe { SetTimer(hwnd, 1, 1000, None); } true }
+                unsafe { SetTimer(hwnd, 1, 1000, None); if a.monitor.enabled { SetTimer(hwnd, 3, 1000, None); } } true }
             WM_ERASEBKGND=>true,
             WM_PAINT=>{
                 a.paints += 1;
                 // SAFETY: Paired paint calls with initialized PAINTSTRUCT and live HWND.
-                unsafe{let mut p=PAINTSTRUCT::default();let dc=BeginPaint(hwnd,&mut p);let saved=SaveDC(dc);let begin=Instant::now();if p.rcPaint.top >= a.px(576) && p.rcPaint.bottom <= a.px(650) {a.paint_stats(dc);} else {a.paint(dc);} a.paint_us+=begin.elapsed().as_micros() as u64;RestoreDC(dc,saved);EndPaint(hwnd,&p);}true
+                unsafe{let mut p=PAINTSTRUCT::default();let dc=BeginPaint(hwnd,&mut p);let saved=SaveDC(dc);let begin=Instant::now();if p.rcPaint.top >= a.px(555) && p.rcPaint.bottom <= a.px(651) {a.paint_stats(dc);} else {a.paint(dc);} a.paint_us+=begin.elapsed().as_micros() as u64;RestoreDC(dc,saved);EndPaint(hwnd,&p);}true
             }
             WM_DRAWITEM if l!=0=>{
                 a.button_paints += 1;
@@ -1648,7 +1868,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             TRAY if l as u32==WM_LBUTTONUP || l as u32==WM_LBUTTONDBLCLK=>{a.show();true}
             TRAY if l as u32==WM_RBUTTONUP=>{
                 // SAFETY: Scoped menu and POINT with fixed commands; destroy after use.
-                unsafe{let mut p=POINT::default();GetCursorPos(&mut p);let menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,CONNECT as usize,wide("Refresh settings").as_ptr());AppendMenuW(menu,MF_STRING,QUIT as usize,wide("Exit").as_ptr());SetForegroundWindow(hwnd);let id=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,p.x,p.y,0,hwnd,ptr::null());DestroyMenu(menu);if id!=0{a.command(id as u16);}}true
+                unsafe{let mut p=POINT::default();GetCursorPos(&mut p);let menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,SHOW as usize,wide("Open").as_ptr());AppendMenuW(menu,MF_STRING,CONNECT as usize,wide(if a.session.allowed { "Refresh settings" } else { "Enable controls" }).as_ptr());AppendMenuW(menu,MF_SEPARATOR,0,ptr::null());AppendMenuW(menu,MF_STRING,QUIT as usize,wide("Exit").as_ptr());SetForegroundWindow(hwnd);let id=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,p.x,p.y,0,hwnd,ptr::null());DestroyMenu(menu);if id!=0{a.command(id as u16);}}true
             }
             WM_CLOSE=>{
                 if w==1{
@@ -1673,6 +1893,28 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
 }
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["--open-installed"] {
+        if mcc::instance::show_existing() {
+            return;
+        }
+        if let Err(e) = mcc::startup::launch() {
+            // SAFETY: Fixed title and diagnostic only; task action cannot be supplied by callers.
+            unsafe {
+                MessageBoxW(
+                    ptr::null_mut(),
+                    wide(&e).as_ptr(),
+                    wide("Minimalist startup").as_ptr(),
+                    MB_OK | MB_ICONERROR,
+                );
+            }
+            return;
+        }
+        let start = Instant::now();
+        while !mcc::instance::show_existing() && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        return;
+    }
     if args == ["--enable-startup"] || args == ["--disable-startup"] {
         if let Err(e) = mcc::startup::set(args == ["--enable-startup"]) {
             // SAFETY: Error display uses static title and bounded generated message.
@@ -1688,11 +1930,23 @@ pub fn run() {
         }
         return;
     }
-    let demo = args == ["--demo"] || args == ["--demo-failure"];
+    let preview = match args.as_slice() {
+        [flag, path] if flag == "--render-preview" => Some(std::path::PathBuf::from(path)),
+        _ => None,
+    };
+    let demo = args == ["--demo"] || args == ["--demo-failure"] || preview.is_some();
     let mode = match args.as_slice() {
         [] => None,
-        [a] if a == "--connect" || a == "--tray" || a == "--demo" || a == "--demo-failure" => None,
+        [a] if a == "--connect"
+            || a == "--tray"
+            || a == "--startup-controls"
+            || a == "--demo"
+            || a == "--demo-failure" =>
+        {
+            None
+        }
         [a, path] if a == "--self-test" => Some((2, std::path::PathBuf::from(path), true, true)),
+        [a, _] if a == "--render-preview" => None,
         [a, seconds, path] if a == "--benchmark" || a == "--benchmark-hidden" => {
             match seconds.parse::<u64>() {
                 Ok(n) if (1..=3600).contains(&n) => Some((
@@ -1707,7 +1961,7 @@ pub fn run() {
         _ => return,
     };
     let _instance = if !demo && mode.is_none() {
-        match mcc::instance::acquire(args == ["--tray"]) {
+        match mcc::instance::acquire(args == ["--tray"] || args == ["--startup-controls"]) {
             Ok(Some(guard)) => Some(guard),
             Ok(None) => return,
             Err(e) => {
@@ -1760,6 +2014,7 @@ pub fn run() {
             hInstance: instance,
             lpszClassName: class.as_ptr(),
             hCursor: LoadCursorW(ptr::null_mut(), IDC_ARROW),
+            hIcon: LoadIconW(instance, ptr::without_provenance(1)),
             ..Default::default()
         };
         if RegisterClassW(&wc) == 0 {
@@ -1849,10 +2104,18 @@ pub fn run() {
             }
         }
     });
-    let settings = std::env::current_exe()
-        .ok()
-        .and_then(|p| Settings::load(&p.with_file_name("profiles.json")).ok())
-        .unwrap_or_default();
+    let loaded = std::env::current_exe()
+        .map_err(|e| e.to_string())
+        .and_then(|p| {
+            let path = p.with_file_name("profiles.json");
+            if path.exists() {
+                Settings::load(&path)
+            } else {
+                Ok(Settings::default())
+            }
+        });
+    let settings_error = loaded.as_ref().err().cloned();
+    let settings = loaded.unwrap_or_default();
     let lighting = settings
         .profiles
         .iter()
@@ -1873,11 +2136,12 @@ pub fn run() {
         monitor: Monitor::default(),
         clock: Instant::now(),
         visible: true,
-        startup: !demo && mcc::startup::enabled().unwrap_or(false),
-        message: "Choose Enable controls to use fans and lighting. Nothing is applied on startup."
-            .into(),
-        error: false,
+        startup: None,
+        message: settings_error.as_ref().map(|e| format!("Preferences could not be loaded: {e}. Defaults shown; hardware was not changed."))
+            .unwrap_or("Enable controls to connect.".into()),
+        error: settings_error.is_some(),
         lighting,
+        last_lighting_sent: None,
         power: if demo {
             Some(PowerPlan::Balanced)
         } else {
@@ -1886,7 +2150,8 @@ pub fn run() {
         settings,
         previous_cpu: None,
         stats: Default::default(),
-        own_memory: String::new(),
+        cpu_clock: String::new(),
+        gpu: None,
         tray: NOTIFYICONDATAW::default(),
         benchmark: mode.and_then(|(seconds, path, hidden, self_test)| {
             before.map(|before| Benchmark {
@@ -1902,50 +2167,41 @@ pub fn run() {
         ticks: 0,
         busy_ticks: 0,
         demo,
-        model: mcc::platform::identity()
+        model: if demo { "MONSTER TULPAR T5 V17.1".into() } else { mcc::platform::identity()
             .model
             .value
-            .unwrap_or("Laptop".into()),
+            .unwrap_or("Laptop".into()) },
         pages_checked: false,
         paints: 0,
         button_paints: 0,
         paint_us: 0,
         dashboard_us: 0,
     };
-    a.button("Enable controls", CONNECT, None, (500, 28, 188, 38));
-    a.button("Cooling", COOLING, None, (32, 112, 128, 38));
-    a.button("Lighting", LIGHTING, None, (172, 112, 128, 38));
-    a.button("Settings", SETTINGS, None, (312, 112, 128, 38));
+    caption(hwnd, &format!("{} · Minimalist Control Center", a.model));
+    a.button("Enable controls", CONNECT, None, (340, 60, 164, 38));
+    a.button("Hide", HIDE, None, (516, 60, 92, 38));
+    a.button("Exit", QUIT, None, (620, 60, 68, 38));
+    a.button("Cooling", COOLING, None, (32, 112, 213, 38));
+    a.button("Lighting", LIGHTING, None, (253, 112, 213, 38));
+    a.button("Settings", SETTINGS, None, (474, 112, 214, 38));
     let c = Some(Page::Cooling);
     let l = Some(Page::Lighting);
     let s = Some(Page::Settings);
-    a.button(
-        "Adaptive · firmware controlled",
-        AUTO,
-        c,
-        (52, 268, 298, 36),
-    );
-    a.button("Turbo · cooling boost", BOOST, c, (370, 268, 298, 36));
-    a.button("Power Saver", QUIET, c, (52, 349, 194, 36));
-    a.button("Balanced", BALANCED, c, (262, 349, 194, 36));
-    a.button("Performance", PERFORMANCE, c, (474, 349, 194, 36));
-    a.button(
-        "Regular presets: Office / Balanced / High / Turbo",
-        REGULAR,
-        c,
-        (32, 447, 656, 28),
-    );
-    a.button("Save current as Custom", SAVE_CUSTOM, c, (32, 505, 318, 32));
-    a.button("Apply saved Custom", APPLY_CUSTOM, c, (370, 505, 318, 32));
-    a.button(
-        "Custom fan curves: awaiting thermal validation",
-        CUSTOM,
-        c,
-        (32, 542, 656, 28),
-    );
-    a.button("Apply keyboard", APPLY_LIGHT, l, (496, 236, 172, 36));
-    a.button("Solid", EFFECT, l, (52, 307, 286, 34));
-    a.button("High", BRIGHTNESS, l, (364, 307, 304, 34));
+    a.button("Automatic", AUTO, c, (52, 372, 298, 32));
+    a.button("Boost", BOOST, c, (370, 372, 298, 32));
+    a.button("Power Saver", QUIET, c, (52, 446, 194, 32));
+    a.button("Balanced", BALANCED, c, (262, 446, 194, 32));
+    a.button("Performance", PERFORMANCE, c, (474, 446, 194, 32));
+    a.button("Office", REGULAR, c, (32, 216, 155, 70));
+    a.button("Balanced", PRESET_DAILY, c, (199, 216, 155, 70));
+    a.button("Performance", PRESET_HIGH, c, (366, 216, 155, 70));
+    a.button("Boost", PRESET_BOOST, c, (533, 216, 155, 70));
+    a.button("Save current", SAVE_CUSTOM, c, (256, 506, 208, 34));
+    a.button("Custom preset", APPLY_CUSTOM, c, (32, 506, 208, 34));
+    a.button("Fan support", CUSTOM, c, (480, 506, 208, 34));
+    a.button("Apply keyboard", APPLY_LIGHT, l, (496, 250, 172, 36));
+    a.button("Solid", EFFECT, l, (52, 317, 286, 34));
+    a.button("High", BRIGHTNESS, l, (364, 317, 304, 34));
     for (i, name) in ["Blue", "Purple", "Green", "Red", "Amber", "White"]
         .iter()
         .enumerate()
@@ -1954,21 +2210,21 @@ pub fn run() {
             name,
             SWATCH + i as u16,
             l,
-            (52 + i as i32 * 50, 378, 40, 36),
+            (52 + i as i32 * 50, 388, 40, 36),
         );
     }
-    a.button("Custom color…", COLOR, l, (364, 378, 304, 36));
-    a.button("Medium", SPEED, l, (52, 451, 286, 34));
-    a.button("Left → right", DIRECTION, l, (364, 451, 304, 34));
-    a.button("Unavailable", BAR, l, (548, 522, 120, 32));
-    a.button("Unavailable", KEY, s, (548, 247, 120, 34));
-    a.button("Unavailable", USB, s, (548, 319, 120, 34));
-    a.button("Off", STARTUP, s, (548, 396, 120, 34));
-    a.button("Turn screen off", SCREEN_OFF, s, (52, 455, 194, 36));
-    a.button("Graphics settings", GPU, s, (262, 455, 194, 36));
-    a.button("Read GPU temp", GPU_TEMP, s, (474, 455, 194, 36));
-    a.button("Use original controller", RESTORE, s, (52, 501, 300, 36));
-    a.button("Exit app", QUIT, s, (474, 501, 194, 36));
+    a.button("Custom color…", COLOR, l, (364, 388, 304, 36));
+    a.button("Medium", SPEED, l, (52, 461, 286, 34));
+    a.button("Left → right", DIRECTION, l, (364, 461, 304, 34));
+    a.button("Unavailable", BAR, l, (548, 506, 120, 32));
+    a.button("Unavailable", KEY, s, (548, 261, 120, 34));
+    a.button("Unavailable", USB, s, (548, 326, 120, 34));
+    a.button("Off", STARTUP, s, (548, 405, 120, 34));
+    a.button("Turn screen off", SCREEN_OFF, s, (32, 515, 316, 34));
+    a.button("Graphics settings", GPU, s, (372, 515, 316, 34));
+    a.button("Read GPU", GPU_TEMP, None, (178, 565, 123, 30));
+    a.button("Use original controller", RESTORE, s, (466, 171, 222, 34));
+    a.button("Details", DETAILS, None, (596, 663, 92, 32));
     if demo {
         a.session.complete(Some((demo_caps(), true)), false);
         a.message = "Preview only · all hardware actions are simulated.".into();
@@ -1978,6 +2234,34 @@ pub fn run() {
         a.pages_checked = a.check_pages();
     }
     a.dashboard();
+    if let Some(path) = preview {
+        if std::fs::create_dir_all(&path).is_ok() {
+            a.stats = ["4%".into(), "40%".into(), "84% · AC".into()];
+            a.startup = Some(mcc::startup::Status {
+                enabled: true,
+                managed: true,
+            });
+            for (page, name) in [
+                (Page::Cooling, "cooling"),
+                (Page::Lighting, "lighting"),
+                (Page::Settings, "settings"),
+            ] {
+                a.page = page;
+                a.refresh_controls();
+                if let Err(e) = a.render_preview(&path.join(format!("{name}.bmp"))) {
+                    eprintln!("Preview: {e}");
+                }
+            }
+        }
+        // SAFETY: Preview never shows a window or adds a tray icon. Release only owned objects.
+        unsafe {
+            DestroyWindow(hwnd);
+            for font in a.fonts {
+                DeleteObject(font);
+            }
+        }
+        return;
+    }
     a.tray.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     a.tray.hWnd = hwnd;
     a.tray.uID = 1;
@@ -1985,7 +2269,7 @@ pub fn run() {
     a.tray.uCallbackMessage = TRAY;
     // SAFETY: Shared system icon; correct tray structure and live callback window.
     unsafe {
-        a.tray.hIcon = LoadIconW(ptr::null_mut(), IDI_APPLICATION);
+        a.tray.hIcon = LoadIconW(GetModuleHandleW(ptr::null()), ptr::without_provenance(1));
     }
     let tip = wide("Minimalist — click to open");
     a.tray.szTip[..tip.len()].copy_from_slice(&tip);
@@ -1993,15 +2277,23 @@ pub fn run() {
     unsafe {
         Shell_NotifyIconW(NIM_ADD, &a.tray);
     }
-    if args == ["--connect"] {
-        a.submit(Job::Connect);
+    if args == ["--connect"] || args == ["--startup-controls"] {
+        a.submit(if args == ["--startup-controls"] {
+            Job::StartupConnect
+        } else {
+            Job::Connect
+        });
     }
-    let hidden = args == ["--tray"] || a.benchmark.as_ref().is_some_and(|b| b.hidden);
+    let hidden = args == ["--tray"]
+        || args == ["--startup-controls"]
+        || a.benchmark.as_ref().is_some_and(|b| b.hidden);
     a.visible = !hidden;
     let test = a.benchmark.as_ref().is_some_and(|b| b.self_test);
     let benchmark = a.benchmark.is_some();
     if test {
         a.submit(Job::ResponsivenessTest);
+    } else if !demo && !benchmark && !a.session.busy {
+        a.submit(Job::StartupStatus);
     }
     APP.with(|slot| *slot.borrow_mut() = Some(a));
     // SAFETY: Standard message loop; hidden tests never initiate hardware access.
@@ -2091,6 +2383,49 @@ mod tests {
         );
         assert!(r.error);
         assert!(!r.status_failed);
+    }
+    #[test]
+    fn startup_status_never_accesses_hardware_and_reports_unknown_on_failure() {
+        let r = worker_with(
+            Job::StartupStatus,
+            |_| Err("provider unavailable".into()),
+            || panic!("Startup status cannot access firmware"),
+        );
+        assert!(r.passive && r.error && r.startup_refreshed);
+        assert!(r.startup.is_none());
+        assert!(!r.status_failed);
+    }
+    #[test]
+    fn startup_light_bar_failure_is_read_back_without_replaying_the_write() {
+        let attempts = std::cell::Cell::new(0);
+        let r = worker_with(
+            Job::StartupConnect,
+            |_| {
+                attempts.set(attempts.get() + 1);
+                Err("light-bar acknowledgement timed out".into())
+            },
+            || Ok(ready()),
+        );
+        assert_eq!(attempts.get(), 1);
+        assert!(r.error && r.startup_attempt);
+        assert!(!r.status_failed);
+        assert!(r.status.is_some());
+        let r = worker_with(
+            Job::StartupConnect,
+            |_| Ok(Completed::message("submitted")),
+            || Ok(ready()),
+        );
+        assert!(r.error);
+        assert!(r.message.contains("still reports on"));
+    }
+    #[test]
+    fn installed_logon_switch_preserves_physical_fan_mode_and_never_applies_keyboard_or_power() {
+        let mut caps = demo_caps();
+        caps.fan_mode_raw = 64;
+        let r = demo_worker(Job::StartupConnect, &mut caps, &mut false);
+        assert!(!caps.light_bar_enabled);
+        assert_eq!(caps.fan_mode_raw, 64);
+        assert!(r.lighting.is_none() && r.power.is_none());
     }
     #[test]
     fn independent_performance_changes_never_request_firmware_status() {

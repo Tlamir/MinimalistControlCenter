@@ -1,8 +1,24 @@
 # Missing features and known issues
 
-Updated 10 October 2026 against v0.4.2. This is a checklist only; recording an item does not mean it has been implemented or tested on hardware.
+Updated 10 October 2026 against v0.7.1. Code delivery and physical acceptance are tracked separately.
 
-## v0.5 work in progress
+## v0.7 delivery
+
+- Dynamic laptop header/title, embedded original Windows/README icon, direct preset buttons and shorter interface copy.
+- Visible-only dashboard and firmware polling; on-demand GPU clock, temperature and supported tachometer readings, with stale samples cleared.
+- Office remains Auto + Power Saver. OEM minimum-speed and custom-table modes are unverified and remain blocked.
+
+## v0.6 delivery
+
+- Redesigned native UI: global Hide/Exit, grouped fan/power controls, compact presets, explicit lighting-send feedback, and full status/error Details. Three native page renders verified; owner acceptance pending.
+- Protected Program Files installer with file hashes, preference migration, desktop shortcut, Installed Apps uninstall, and startup rollback on installation failure.
+- Current administrator user's elevated interactive logon task; one-time installation approval, no stored password or repeated sign-in prompt. Starts on AC/battery and requests light-bar off after sign-in.
+- Startup controls use bounded helpers with task/real-registry verification. Portable startup remains monitor only. No continuous startup metadata polling.
+- Exact reviewed OEM launcher startup is backed up/disabled to avoid competing controllers and restored on uninstall. Other OSD/touchpad entries are preserved.
+- Startup write failures report a tray warning and fresh status; no write replay. Additional fan levels remain gated by the documented [fan assessment](FAN_SUPPORT.md).
+- Real installation, installed hash/permission checks, startup off/on and unelevated desktop/task launch passed in v0.6.2. Fresh firmware readback reports light bar off. The owner confirmed real restart/startup and physical light-bar-off. Physical keyboard acceptance, battery sign-in and end-to-end uninstall remain separate owner checks.
+
+## v0.5 implemented foundation
 
 - Implemented separate Adaptive/Turbo fan buttons and Power Saver/Balanced/Performance buttons; each preserves the other setting.
 - Kept regular Office/Balanced/High/Turbo combinations in a presets menu.
@@ -11,12 +27,12 @@ Updated 10 October 2026 against v0.4.2. This is a checklist only; recording an i
 
 ## Priority 1 — reported problems and requested everyday behavior
 
-- [ ] **Fix incomplete keyboard lighting.** Owner reports that changing lighting changes only one side of the keyboard. Full-keyboard control is not working correctly. Which keys/zones and effects are affected, and the protocol cause, have not been established. Verify whole-keyboard coverage for every supported effect, color, brightness and off command before calling lighting complete.
-- [ ] **Keep the light bar off after restart.** Remember the desired state and reliably apply it at Windows sign-in. Before-Windows/boot lighting persistence is a separate, unverified firmware capability.
+- [ ] **Fix incomplete keyboard lighting.** Owner reports that changing lighting changes only one side of the keyboard. Full-keyboard control is not working correctly. The four-zone Solid palette omission was identified and corrected in v0.5.1; physical acceptance of that correction remains pending. Verify whole-keyboard coverage for every supported effect, color, brightness and off command before calling lighting complete.
+- [x] **Physically verify light bar off after restart.** Owner confirmed this on v0.6.2. Before-Windows/boot lighting persistence is a separate, unverified firmware capability.
 - [ ] **Verify reliable light-bar ON → OFF switching.** Earlier owner report: ON worked, but OFF required reconnecting. Acknowledgement/recovery logic was changed, but a conclusive physical retest is still missing.
-- [ ] **Make startup settings reliable from packaged launch contexts.** The toggle can read/write a private redirected registry instead of Windows' real startup entry. This laptop's real entry was separately corrected and independently verified; automatic handling in the app remains unfinished.
-- [ ] **Complete a real restart test.** Confirm one tray instance starts, can be opened, and connects correctly after sign-in. Registry readback and process-start tests do not prove reboot behavior.
-- [ ] **Persistent privileged control and preferences.** Current startup opens a monitor-only tray app; Enable controls still needs administrator approval after sign-in. A protected, narrowly scoped background component and reliable preference restoration are not implemented.
+- [x] **Handle startup settings from packaged launch contexts in code.** Startup now uses Task Scheduler or the real Windows registry provider through a bounded helper, rather than native reads/writes of a private redirected hive. Provider failure remains visible instead of appearing Off.
+- [x] **Complete a real restart test.** Owner confirmed automatic startup and light-bar-off after a normal restart on v0.6.2. Battery sign-in is a separate check.
+- [x] **Verify installed privileged launch.** Protected demand launch, ordinary-user run permission and startup off/on passed. Controls are ready and firmware reports light bar off. The real sign-in event remains covered by the separate pending restart check.
 - [ ] **Finish usability polish and owner acceptance.** Confirm clear fan/power wording, lighting feedback, tray discovery, close-versus-exit behavior and readable errors. The latest working connection does not establish that the overall UI meets the owner's expectations.
 
 ## Priority 2 — actual cooling controls and trustworthy telemetry
@@ -43,14 +59,14 @@ Updated 10 October 2026 against v0.4.2. This is a checklist only; recording an i
 
 ## Delivery and independence
 
-- [ ] **Finish installation/update/uninstall behavior.** Reliable shortcuts, version migration, startup cleanup and clear diagnostics remain product work. Builds are currently unsigned prereleases.
+- [ ] **Verify installation/update/uninstall on the target laptop.** Protected versioned installation, shortcut migration, uninstall registration, startup cleanup/rollback and package verification are implemented. Builds remain unsigned prereleases; real installer/uninstall acceptance is tracked separately.
 - [ ] **Verify operation after OEM removal/disablement.** Code supports an absent OEM service and does not load OEM DLLs, but a complete real uninstall/reboot/hotkey test has not been performed. Do not claim full replacement yet.
-- [ ] **Resolve original OEM startup interference.** The original launcher still has its own Windows startup entry. Its InstallServGM prompt belongs to the OEM software; coexistence and removal guidance need validation. Do not remove it automatically as part of this checklist.
+- [ ] **Verify original OEM startup handover.** Installer now backs up/disables only the exact reviewed launcher entry and restores it on uninstall. Already-running GUIs must be exited; touchpad/OSD startup is preserved. Startup passed the owner restart test; uninstall restoration is untested.
 
 ## Confirmed working — do not reopen as missing without new evidence
 
 - Administrator handoff/Enable controls: owner confirmed working in v0.4.2 after the physical-path fix.
 - Firmware Automatic and Turbo/Boost: short physical fan response was confirmed previously.
 - Physical turbo button: owner confirmed that the app's mode display updates correctly in v0.4.2.
-- Real Windows startup entry: independently verified for the installed v0.4.2 path; actual reboot and the packaged-context toggle remain outstanding above.
+- Real Windows startup entry: independently verified for the installed v0.4.2 path; v0.6.2 installer/task toggles and owner reboot test now pass.
 - Native UI, bounded helper execution, automated tests and measured UI resource use exist. They do not establish full feature parity or a guarantee against hardware failure.

@@ -1,6 +1,16 @@
-# Safety boundary — v0.4
+# v0.7 update
 
-The backend permits firmware automatic/boost, three convenience switches, supported keyboard HID effects, and documented Windows controls. It excludes fixed speeds, fan-off, arbitrary EC writes, custom low-speed tables, power-limit/voltage changes, firmware flashing, driver installation and machine-wide startup configuration changes. The sole registry-write feature is the explicit current-user `Run/MinimalistControlCenter` startup value, pointing to the quoted current UI executable with `--tray`. It does not elevate, change the OEM service startup type, or apply a cooling preset.
+No additional fan writes are enabled. Office minimum/fixed/table modes still require independent protection and calibration evidence. Dynamic laptop naming does not broaden the hardware allowlist. GPU temperature/clock/tachometer requests use public read-only NVAPI interfaces through the same bounded helper; no continuous GPU polling or new driver. Zero/unavailable tach readings remain unknown. CPU clock uses read-only Windows power information and is labelled OS, not instantaneous per-core turbo.
+
+The dashboard and firmware observation timers stop when hidden. Reopening reads current state; every hardware write still checks ownership, capabilities and readback. Firmware Auto/Boost operates independently of the GUI. The owner confirmed real restart/startup and physical light-bar-off on v0.6.2.
+
+# Safety boundary — v0.6
+
+The backend permits firmware automatic/boost, three convenience switches, supported keyboard HID effects, and documented Windows controls. It excludes fixed speeds, fan-off, arbitrary EC writes, custom low-speed tables, power-limit/voltage changes, firmware flashing and driver installation. Portable startup changes only the current-user `Run/MinimalistControlCenter` value and applies no hardware settings.
+
+The optional administrator installer protects versioned binaries under Program Files and registers a task for the current administrator user's interactive logon, with highest available privileges and no stored password. The task's owner/DACL permits ordinary read/run access but not action replacement; binaries and working directory allow ordinary read/execute only. Startup requests connection and light-bar off, never a saved fan/power/keyboard profile. Existing OEM service handover still restores Auto when required. Failed requests are followed by readback, never an automatic replay, and generate a tray warning.
+
+Installation removes the old Minimalist Run entry, adds a fixed per-user Installed Apps record, and backs up/removes only the exact reviewed HKLM Monster launcher startup entry. Touchpad/OSD entries and OEM service startup type are preserved. Uninstall restores the backed-up exact launcher command and preserves saved profiles. Elevated startup is never registered against a user-writable portable directory. Task/real-registry status is checked through bounded helpers rather than a private package hive.
 
 No software guarantees a PC can never fail. Evidence covers one short physical cooling test on one BIOS, not all workloads or power transitions. Keep the OEM app installed.
 
@@ -14,8 +24,9 @@ No software guarantees a PC can never fail. Evidence covers one short physical c
 - Handover only stops/starts the existing exact-path GamingCenter user-mode launcher, in automatic fan mode. No driver service or startup configuration changes. Exit its already-launched GUI separately.
 - The running UI holds read-only/no-delete leases on the helper executable and its immediate directory, preventing ordinary replacement while it can launch elevated helpers. Versioned installation avoids overwriting a running version.
 - UI helpers have five-second deadlines and 64 KiB per-stream output limits. Killing a helper cannot undo an already-submitted transaction. Manual CLI operations have no supervising process timeout.
+- Startup helpers use a 15-second outer deadline and a 12-second PowerShell deadline. Child processes belong to a kill-on-close Windows job, so timeout cleanup also terminates descendants. Startup metadata is not polled continuously or synchronously on the UI thread.
 - After a hardware action, including failure, the UI refreshes status. Fresh readback and ownership allow further actions; unavailable status revokes access. Recovery never replays the action. Missing OEM software needs no handover service; changed/ambiguous service paths are refused.
-- Profiles validate bounded JSON before use, report partial application, and never apply on startup. Office/Balanced/High workload presets select firmware Auto before changing the Windows power plan. Turbo preserves the power plan. These modes do not pin fan speed low.
+- Profiles validate bounded JSON before use, report partial application, and never apply automatically on startup. The installed logon task makes one separate desired-state light-bar-off request. Office/Balanced/High workload presets select firmware Auto before changing the Windows power plan. Turbo preserves the power plan. These modes do not pin fan speed low.
 
 ## Cooling and physical button
 
@@ -31,7 +42,7 @@ First fan test refused writes while the OEM service ran. Later test paused it, s
 
 NVAPI read GPU temperature 38°C. CPU/RPM candidates remain uncalibrated; plausible numbers are insufficient proof. Physical lighting/switch behavior, sustained thermals/noise, AC changes, resume, reboot and physical turbo interaction remain pending.
 
-PE audit excludes known driver-installation/configuration, raw EC library, remote-memory and power-limit APIs. HID, standard power-plan selection and fixed OEM launcher handover are expected. RegSetValueExW is now an expected import for the sole HKCU startup value. The import audit cannot enforce which registry path is used; that scope is reviewed in src/startup.rs. This is defense in depth, not proof of every side effect.
+PE audit excludes known driver-installation/configuration, raw EC library, remote-memory and power-limit APIs. HID, standard power-plan selection and fixed OEM launcher handover are expected. Startup registry access uses the embedded, fixed-scope Windows provider script in src/startup.ps1. The import audit cannot enforce the PowerShell script boundary; that source is reviewed separately. Disabling startup disables only the logon trigger, preserving protected demand launch. This is defense in depth, not proof of every side effect.
 
 OEM binaries/decompilation, tools, credentials and raw local reports are excluded from publication. Diagnostics omit serial numbers, usernames, hostname and MAC addresses.
 

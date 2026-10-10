@@ -1,5 +1,25 @@
 //! Opt-in NVIDIA temperature read using the documented NVAPI thermal interface.
+use serde::{Deserialize, Serialize};
 use std::{ffi::c_void, ptr};
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sensors {
+    pub temperature_c: Option<i32>,
+    pub clock_mhz: Option<u32>,
+    pub fan_rpm: Option<u32>,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ClockDomain {
+    present: u32,
+    frequency: u32,
+}
+#[repr(C)]
+#[derive(Default)]
+struct Clocks {
+    version: u32,
+    clock_type: u32,
+    domains: [ClockDomain; 32],
+}
 use windows_sys::Win32::{
     Foundation::FreeLibrary,
     System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
@@ -24,8 +44,10 @@ type Query = unsafe extern "C" fn(u32) -> *mut c_void;
 type Initialize = unsafe extern "C" fn() -> i32;
 type Enumerate = unsafe extern "C" fn(*mut *mut c_void, *mut u32) -> i32;
 type GetThermal = unsafe extern "C" fn(*mut c_void, u32, *mut Thermal) -> i32;
+type GetClocks = unsafe extern "C" fn(*mut c_void, *mut Clocks) -> i32;
+type GetFan = unsafe extern "C" fn(*mut c_void, *mut u32) -> i32;
 
-pub fn temperature() -> Result<i32, String> {
+pub fn sensors() -> Result<Sensors, String> {
     let name: Vec<u16> = "nvapi64.dll".encode_utf16().chain(Some(0)).collect();
     // SAFETY: Search restricted to Windows System32, avoiding DLL loading from the app directory.
     let module =
@@ -82,14 +104,48 @@ pub fn temperature() -> Result<i32, String> {
             };
             // SAFETY: Live NVAPI GPU handle, sensor index zero and correctly versioned V2 structure.
             let status = unsafe { thermal(handles[0], 0, &mut data) };
-            if status != 0 || !(1..=3).contains(&data.count) {
-                return Err(format!("GPU temperature unavailable ({status})"));
-            }
             let sensor = data.sensors[0];
-            if sensor.target != 1 || !(-20..=125).contains(&sensor.current) {
-                return Err("GPU sensor returned an invalid target or temperature".into());
+            let temperature_c = (status == 0
+                && (1..=3).contains(&data.count)
+                && sensor.target == 1
+                && (-20..=125).contains(&sensor.current))
+            .then_some(sensor.current);
+            let mut clock_mhz = None;
+            let mut fan_rpm = None;
+            // SAFETY: Published read-only NVAPI IDs and matching C ABIs; module and GPU handle live.
+            unsafe {
+                let clock = query(0xdcb616c3);
+                if !clock.is_null() {
+                    let clock: GetClocks = std::mem::transmute(clock);
+                    let mut clocks = Clocks {
+                        version: std::mem::size_of::<Clocks>() as u32 | (3 << 16),
+                        ..Default::default()
+                    };
+                    if clock(handles[0], &mut clocks) == 0
+                        && clocks.domains[0].present & 1 != 0
+                        && (1..=20_000_000).contains(&clocks.domains[0].frequency)
+                    {
+                        clock_mhz = Some(clocks.domains[0].frequency / 1000);
+                    }
+                }
+                let fan = query(0x5f608315);
+                if !fan.is_null() {
+                    let fan: GetFan = std::mem::transmute(fan);
+                    let mut rpm = 0;
+                    // Zero on this laptop is not proven to mean a stopped fan. Leave it unknown.
+                    if fan(handles[0], &mut rpm) == 0 && (1..=30_000).contains(&rpm) {
+                        fan_rpm = Some(rpm);
+                    }
+                }
             }
-            Ok(sensor.current)
+            if temperature_c.is_none() && clock_mhz.is_none() && fan_rpm.is_none() {
+                return Err("GPU sensors unavailable on this driver".into());
+            }
+            Ok(Sensors {
+                temperature_c,
+                clock_mhz,
+                fan_rpm,
+            })
         })();
         // SAFETY: Balance successful NVAPI initialization on every result path.
         unsafe {
@@ -111,5 +167,6 @@ mod tests {
     fn thermal_abi_matches_nvidia_v2() {
         assert_eq!(std::mem::size_of::<Thermal>(), 68);
         assert_eq!(std::mem::size_of::<Sensor>(), 20);
+        assert_eq!(std::mem::size_of::<Clocks>(), 264);
     }
 }

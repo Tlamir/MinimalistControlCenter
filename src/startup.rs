@@ -1,4 +1,13 @@
-//! Current-user logon startup only. No elevation, service, or automatic hardware writes.
+//! Explicit logon startup. Elevated startup is installed only in protected Program Files.
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Status {
+    pub enabled: bool,
+    pub managed: bool,
+}
+
 pub fn command(executable: &str) -> Result<String, String> {
     if executable.contains(['"', '\0', '\r', '\n'])
         || !executable
@@ -20,121 +29,59 @@ pub fn command(executable: &str) -> Result<String, String> {
 
 #[cfg(windows)]
 mod native {
-    use std::ptr;
-    use windows_sys::Win32::{Foundation::*, System::Registry::*};
-    const KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-    const VALUE: &str = "MinimalistControlCenter";
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(Some(0)).collect()
-    }
-    struct Key(HKEY);
-    impl Drop for Key {
-        fn drop(&mut self) {
-            // SAFETY: Handle is returned by RegCreateKeyExW and closed once.
-            unsafe {
-                RegCloseKey(self.0);
-            }
-        }
-    }
-    fn open(write: bool) -> Result<Key, String> {
-        let mut key = ptr::null_mut();
-        // SAFETY: Fixed current-user key; valid UTF16 and output handle; no machine policy changes.
-        let code = unsafe {
-            if write {
-                RegCreateKeyExW(
-                    HKEY_CURRENT_USER,
-                    wide(KEY).as_ptr(),
-                    0,
-                    ptr::null(),
-                    0,
-                    KEY_QUERY_VALUE | KEY_SET_VALUE,
-                    ptr::null(),
-                    &mut key,
-                    ptr::null_mut(),
-                )
-            } else {
-                RegOpenKeyExW(
-                    HKEY_CURRENT_USER,
-                    wide(KEY).as_ptr(),
-                    0,
-                    KEY_QUERY_VALUE,
-                    &mut key,
-                )
-            }
-        };
-        if code != ERROR_SUCCESS {
-            return Err(format!("Startup registry unavailable ({code})"));
-        }
-        Ok(Key(key))
-    }
-    fn expected() -> Result<String, String> {
+    use super::Status;
+    use std::{os::windows::process::CommandExt, process::Command, time::Duration};
+
+    fn request(action: &str) -> Result<Status, String> {
         let path = std::env::current_exe()
             .map_err(|e| e.to_string())?
             .with_file_name("mcc-ui.exe");
-        if !path.is_file() {
-            return Err("Keep mcc-ui.exe alongside mcc.exe before enabling startup".into());
-        }
         let physical = crate::elevation::physical_shell_path(&path).map_err(|e| e.to_string())?;
-        super::command(&physical.to_string_lossy())
+        let expected = super::command(&physical.to_string_lossy())?;
+        let mut cmd = Command::new(crate::platform::powershell_path()?);
+        cmd.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            include_str!("startup.ps1"),
+        ])
+        .env("MCC_STARTUP_ACTION", action)
+        .env("MCC_STARTUP_EXECUTABLE", physical)
+        .env("MCC_STARTUP_COMMAND", expected)
+        .creation_flags(0x08000000);
+        let bytes = crate::process::run(&mut cmd, Duration::from_secs(12))
+            .map_err(|e| format!("Windows startup request failed: {e:?}"))?;
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Reply {
+            ok: bool,
+            enabled: bool,
+            managed: bool,
+            error: Option<String>,
+        }
+        let reply: Reply =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid startup reply: {e}"))?;
+        if !reply.ok {
+            return Err(reply.error.unwrap_or("Windows startup unavailable".into()));
+        }
+        Ok(Status {
+            enabled: reply.enabled,
+            managed: reply.managed,
+        })
     }
-    pub fn enabled() -> Result<bool, String> {
-        let key = open(false)?;
-        let mut bytes = [0u16; 512];
-        let mut size = (bytes.len() * 2) as u32;
-        let mut kind = 0;
-        // SAFETY: Buffer has size bytes capacity; fixed value name and live read-only key.
-        let code = unsafe {
-            RegQueryValueExW(
-                key.0,
-                wide(VALUE).as_ptr(),
-                ptr::null(),
-                &mut kind,
-                bytes.as_mut_ptr().cast(),
-                &mut size,
-            )
-        };
-        if code == ERROR_FILE_NOT_FOUND {
-            return Ok(false);
-        }
-        if code != ERROR_SUCCESS || kind != REG_SZ || !size.is_multiple_of(2) || size < 2 {
-            return Err(format!("Cannot verify startup entry ({code})"));
-        }
-        let count = size as usize / 2;
-        if count > bytes.len() || bytes[count - 1] != 0 {
-            return Err("Malformed startup entry".into());
-        }
-        Ok(String::from_utf16(&bytes[..count - 1]).map_err(|e| e.to_string())? == expected()?)
+    pub fn status() -> Result<Status, String> {
+        request("status")
     }
-    pub fn set(enabled: bool) -> Result<(), String> {
-        let command = expected()?;
-        let key = open(true)?;
-        let bytes = wide(&command);
-        // SAFETY: Only this app's fixed HKCU value; bounded NUL-terminated UTF16 command.
-        let code = unsafe {
-            if enabled {
-                RegSetValueExW(
-                    key.0,
-                    wide(VALUE).as_ptr(),
-                    0,
-                    REG_SZ,
-                    bytes.as_ptr().cast(),
-                    (bytes.len() * 2) as u32,
-                )
-            } else {
-                RegDeleteValueW(key.0, wide(VALUE).as_ptr())
-            }
-        };
-        if code != ERROR_SUCCESS && !(code == ERROR_FILE_NOT_FOUND && !enabled) {
-            return Err(format!("Couldn't change startup ({code})"));
-        }
-        if self::enabled()? != enabled {
-            return Err("Startup readback mismatch".into());
-        }
-        Ok(())
+    pub fn set(enabled: bool) -> Result<Status, String> {
+        request(if enabled { "on" } else { "off" })
+    }
+    pub fn launch() -> Result<Status, String> {
+        request("launch")
     }
 }
 #[cfg(windows)]
-pub use native::{enabled, set};
+pub use native::{launch, set, status};
 
 #[cfg(test)]
 mod tests {

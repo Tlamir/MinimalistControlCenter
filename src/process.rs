@@ -38,6 +38,47 @@ pub enum RunError {
     Exit,
 }
 
+/// Closing this lease terminates descendants too, including startup's one-shot PowerShell.
+#[cfg(windows)]
+struct ChildJob(windows_sys::Win32::Foundation::HANDLE);
+#[cfg(windows)]
+impl Drop for ChildJob {
+    fn drop(&mut self) {
+        // SAFETY: Owns exactly one job handle, configured to kill only its assigned children.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+#[cfg(windows)]
+impl ChildJob {
+    fn attach(child: &std::process::Child) -> Result<Self, RunError> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::*;
+        // SAFETY: Unnamed job with default security and a valid configuration structure.
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle.is_null() {
+                return Err(RunError::Spawn);
+            }
+            let job = Self(handle);
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            ) == 0
+                || AssignProcessToJobObject(handle, child.as_raw_handle()) == 0
+            {
+                return Err(RunError::Spawn);
+            }
+            Ok(job)
+        }
+    }
+}
+
 fn reader(stream: impl Read + Send + 'static, tx: mpsc::Sender<Result<Vec<u8>, RunError>>) {
     thread::spawn(move || {
         let mut data = Vec::new();
@@ -61,6 +102,15 @@ pub fn run(command: &mut Command, timeout: Duration) -> Result<Vec<u8>, RunError
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| RunError::Spawn)?;
+    #[cfg(windows)]
+    let _job = match ChildJob::attach(&child) {
+        Ok(job) => job,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
     let (out_tx, out_rx) = mpsc::channel();
     let (err_tx, err_rx) = mpsc::channel();
     reader(child.stdout.take().expect("piped stdout"), out_tx);
@@ -120,6 +170,18 @@ mod tests {
                 let _ = std::io::stderr().write_all(&vec![b'x'; OUTPUT_LIMIT * 2]);
             }
             Ok("exit") => std::process::exit(7),
+            #[cfg(windows)]
+            Ok("tree") => {
+                let mut command = child("hang");
+                command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+                let mut descendant = command.spawn().unwrap();
+                std::fs::write(
+                    std::env::var_os("MCC_TEST_GRANDCHILD_PID").unwrap(),
+                    descendant.id().to_string(),
+                )
+                .unwrap();
+                let _ = descendant.wait();
+            }
             Ok("ok") => println!("fixture works"),
             _ => {}
         }
@@ -142,6 +204,31 @@ mod tests {
             Err(RunError::Timeout)
         );
         assert!(now.elapsed() < Duration::from_secs(3));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn timeout_also_terminates_descendants_that_hold_the_output_pipe() {
+        use windows_sys::Win32::{Foundation::*, System::Threading::*};
+        let file = std::env::temp_dir().join(format!("mcc-child-tree-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let mut command = child("tree");
+        command.env("MCC_TEST_GRANDCHILD_PID", &file);
+        assert_eq!(
+            run(&mut command, Duration::from_secs(1)),
+            Err(RunError::Timeout)
+        );
+        let pid: u32 = std::fs::read_to_string(&file).unwrap().parse().unwrap();
+        let _ = std::fs::remove_file(file);
+        // SAFETY: Query only the disposable test descendant; close the acquired handle once.
+        unsafe {
+            let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if handle.is_null() {
+                assert_eq!(GetLastError(), ERROR_INVALID_PARAMETER);
+            } else {
+                assert_eq!(WaitForSingleObject(handle, 1000), WAIT_OBJECT_0);
+                CloseHandle(handle);
+            }
+        }
     }
     #[test]
     fn stdout_is_bounded() {

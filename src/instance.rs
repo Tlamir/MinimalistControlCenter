@@ -25,6 +25,21 @@ pub fn class() -> &'static str {
         "MinimalistControlCenter.Native.User"
     }
 }
+pub fn show_existing() -> bool {
+    // SAFETY: Restore only this application's existing admin UI, with no pointer messages.
+    unsafe {
+        let hwnd = FindWindowW(
+            wide("MinimalistControlCenter.Native.Admin").as_ptr(),
+            ptr::null(),
+        );
+        if hwnd.is_null() {
+            return false;
+        }
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+        true
+    }
+}
 pub fn acquire(hidden: bool) -> Result<Option<Instance>, String> {
     let class = class();
     // SAFETY: Queries an existing own window class; no pointers or hardware commands sent.
