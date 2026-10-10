@@ -1,3 +1,15 @@
+# Verified v0.4.2 delivery — 10 October 2026
+
+Installed: C:/Users/yigit/Applications/MinimalistControlCenter/0.4.2. Owner explicitly confirmed Enable controls succeeds and physical turbo changes synchronize with UI. 95 release tests, strict Clippy/fmt, both PE audits, Windows+Ubuntu CI for code commit4a035df pass. Source includes physical path resolution for runas/startup and installer outside redirected AppData.
+
+Startup follow-up: even owner's off/on and requested Win+R CLI step did not appear in Win32_StartupCommand. Native HKCU and explicit HKU readbacks from packaged tool context were insufficient. Used Windows StdRegProv SetStringValue for ONLY current-user Run/MinimalistControlCenter = quoted installed mcc-ui.exe plus --tray. Independent StdRegProv readback and Win32_StartupCommand now BOTH confirm the exact real entry. Real restart not performed. Startup toggle when launched from a packaged process can still target a private hive: needs future automatic handling; do not infer this is fixed in code. No OEM startup entries removed.
+
+Remaining: automatic light-bar-off after restart (owner request); reliable privileged startup/preferences architecture; minimum-noise/custom cooling blocked pending calibrated sensors and verified autonomous thermal failover. No new real fan/lighting writes in this fix except owner's own Turbo/button test. Owner prefers to do visual checks; avoid computer-use.
+
+GitHub code fix4a035df and owner confirmationa7c13c9 pushed. v0.4.2 release being finalized; prior chronological notes follow.
+
+---
+
 # Active v0.4.2 correction — 10 October 2026
 
 Owner's screenshot overrides the earlier mistaken Controls ready reply: v0.4.1 failed with Windows error 3. Root cause identified by GetFinalPathNameByHandle: apparent AppData/Local/MinimalistControlCenter install was redirected into the Codex package LocalCache/Local folder. Shell runas against the apparent path failed, while the same bytes in the build folder elevated successfully. Exiting the UI did not fix it, ruling out the directory lease hypothesis; retained original lease behavior.
@@ -5,6 +17,8 @@ Owner's screenshot overrides the earlier mistaken Controls ready reply: v0.4.1 f
 Fix: resolve current executable through canonicalize (GetFinalPathNameByHandle) before ShellExecuteEx, remove only local-drive extended prefix while retaining UTF-16, supply physical parent working directory. Startup registration also uses the physical path. Installer now uses %USERPROFILE%/Applications/MinimalistControlCenter/<version>, outside the redirected AppData directory. Error dialog preserves Windows error codes; only 1223 is cancellation. COM initialization and synchronous launch retained.
 
 Build target remains target/v041 for v0.4.2. 95 release tests, strict Clippy and PE audits pass. Installed in C:/Users/yigit/Applications/MinimalistControlCenter/0.4.2 and startup readback passes. Owner confirmed Enable controls and physical turbo-button/UI synchronization both work. GitHub source fix pushed as 4a035df; v0.4.2 publication is being finalized. Exact old v0.4.1 installed bytes elevated successfully through their physical package-cache path (read-only self-test), confirming the path-redirection diagnosis. Automatic light-bar-off on restart remains requested and unfinished. Older notes below are historical, not proof of a working v0.4.1 handoff.
+
+Additional startup issue: packaged-process HKCU readback shows the new Applications path, but Win32_StartupCommand omits it (provider returns six other entries). Owner toggling startup from the UAC-launched app did not make it visible. Asked owner to run installed mcc.exe startup on via Win+R, which originates outside the package context. Await independent provider confirmation. Do not call startup validated based only on same-context readback. README now calls out normal Windows PowerShell installation. CI on code commit 4a035df passed Windows and Ubuntu.
 
 ---
 

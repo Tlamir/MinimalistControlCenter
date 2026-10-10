@@ -4,7 +4,7 @@
 
 Actual UAC isolation: v0.4.1 at its apparent LocalAppData path failed with error 3 both while running and after exit. GetFinalPathNameByHandle exposed package filesystem redirection. Launching those exact installed bytes through the resolved package-cache path succeeded, exit 0; its elevated UI self-test reported hardware_accessed=false and worker_responsive=true. This test changed no firmware settings. It is functional verification, not a new performance comparison.
 
-v0.4.2 installed at %USERPROFILE%/Applications/MinimalistControlCenter/0.4.2. Startup readback passed. The owner confirmed Enable controls succeeds and pressing the physical turbo button correctly updates the UI. Historical v0.4 measurements below must not be read as evidence that its original installation supported UAC or reboot startup.
+v0.4.2 installed at %USERPROFILE%/Applications/MinimalistControlCenter/0.4.2. Initial same-process startup readback passed but proved insufficient under package registry redirection. The fixed current-user entry was subsequently registered through StdRegProv and independently confirmed by both StdRegProv and Win32_StartupCommand. A real reboot remains untested. The owner confirmed Enable controls succeeds and pressing the physical turbo button correctly updates the UI. Historical v0.4 measurements below must not be read as evidence that its original installation supported UAC or reboot startup.
 
 ---
 
