@@ -1,4 +1,18 @@
+# Active v0.5 work — 10 October 2026
+
+Latest user resumed implementation and requested separate fan/performance controls while keeping regular presets and custom choices. This supersedes the earlier documentation-only request.
+
+Implemented: independent Adaptive/Turbo fan controls and Power Saver/Balanced/Performance plans; original workload presets retained in a menu; Save current as Custom and Apply saved Custom reuse validated settings schema and never automatically apply at startup. Applying Custom changes fan + power only, preserving lighting. Power-only jobs never request firmware status.
+
+Lighting: compared the existing picture stream with original local OEM protocol. Added explicit row0..5 selection (feature0x16), each with 21 planar B/G/R values, for Solid on usagepageff02 only. Tests verify all126 LED positions and zero nonvolatile save byte. No firmware flash writes. Physical fix is not yet confirmed. Asked owner which effect/side fails and to exit older app before installation; replies pending.
+
+Build target remains target/v041; Cargo package v0.5.0. 100 release tests, strict Clippy/fmt and both binary audits pass. Installed at C:/Users/yigit/Applications/MinimalistControlCenter/0.5.0, opened for owner verification. Desktop shortcut C:/Users/yigit/Desktop/Minimalist Control Center.lnk points to it. Installer uses StdRegProv for real startup registration and bounded copying of previous profiles.json; Win32_StartupCommand confirms the v0.5.0 path. Owner confirmed the original lighting symptom affects Solid colors on the left only, and could not locate any tray app; process inventory showed none running. Asked owner to test Solid now; result pending. Publication pending. Other missing features remain in docs/MISSING_FEATURES.md, especially verified low/custom cooling, startup preferences/light-bar-off, and package-context startup toggle handling.
+
+---
+
 # Verified v0.4.2 delivery — 10 October 2026
+
+Latest owner request: documentation only; do not implement or run hardware tests in this turn. See [Missing features and known issues](docs/MISSING_FEATURES.md). New reported defect: lighting changes only one side of the keyboard; cause and affected zones/effects are not established.
 
 Installed: C:/Users/yigit/Applications/MinimalistControlCenter/0.4.2. Owner explicitly confirmed Enable controls succeeds and physical turbo changes synchronize with UI. 95 release tests, strict Clippy/fmt, both PE audits, Windows+Ubuntu CI for code commit4a035df pass. Source includes physical path resolution for runas/startup and installer outside redirected AppData.
 

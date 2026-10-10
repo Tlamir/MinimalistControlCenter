@@ -1,3 +1,9 @@
+# v0.5 Solid lighting row transfer
+
+For the already-supported first-generation per-key HID collection (usage page ff02), Solid now uses explicit row addressing rather than the picture-stream path. Local OEM static analysis exposes six rows of 21 LEDs: select row0..5 using feature opcode0x16, then a 65-byte output report with report-ID/padding followed by21 blue,21 green,21 red bytes. Mode remains volatile user mode51; nonvolatile save remains zero. Uniform color makes row orientation irrelevant. Other effects/collections are unchanged. Automated tests verify126 LED slots and all row selectors; physical acceptance is pending. No proprietary implementation is distributed.
+
+---
+
 # v0.4 investigation update — 10 October 2026
 
 The owner confirmed that the physical turbo button changes cooling but the v0.3 display stayed stale. v0.4 adds bounded read-only observation and derives highlighted presets from observed mode and active Windows plan. It never replays the old fan request to fight a physical-button change.

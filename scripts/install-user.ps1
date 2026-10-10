@@ -37,7 +37,52 @@ foreach ($name in @('mcc.exe','mcc-ui.exe','README.md','LICENSE','THIRD_PARTY_NO
 foreach ($name in @('mcc.exe','mcc-ui.exe')) {
     if ((Get-FileHash -LiteralPath (Join-Path $Source $name)).Hash -ne (Get-FileHash -LiteralPath (Join-Path $folder $name)).Hash) { throw "Copy verification failed: $name" }
 }
-$reply = & (Join-Path $folder 'mcc.exe') startup on | ConvertFrom-Json
-if (-not $reply.ok -or -not $reply.enabled) { throw ('Files installed, but startup registration failed: '+$reply.error) }
+# Preserve the last installed preferences without applying them or overwriting
+# preferences already belonging to this version. Runtime validation still applies.
+$preferences = Join-Path $folder 'profiles.json'
+if (-not (Test-Path -LiteralPath $preferences)) {
+    $previous = Get-ChildItem -LiteralPath $parent -Directory |
+        Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' -and
+            -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+            [version]$_.Name -lt [version](Split-Path $folder -Leaf) } |
+        Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+    if ($previous) {
+        $oldPreferences = Join-Path $previous.FullName 'profiles.json'
+        if (Test-Path -LiteralPath $oldPreferences -PathType Leaf) {
+            $item = Get-Item -LiteralPath $oldPreferences
+            if ($item.Length -le 16384 -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                Copy-Item -LiteralPath $oldPreferences -Destination $preferences
+            }
+        }
+    }
+}
+# Use Windows' registry provider so a packaged terminal cannot silently register
+# only in its private hive. The scope remains this one current-user value.
+$startupArgs = @{
+    hDefKey = [uint32]2147483649
+    sSubKeyName = 'Software\Microsoft\Windows\CurrentVersion\Run'
+    sValueName = 'MinimalistControlCenter'
+    sValue = ('"' + (Join-Path $folder 'mcc-ui.exe') + '" --tray')
+}
+$reply = Invoke-CimMethod -Namespace root/default -ClassName StdRegProv -MethodName SetStringValue -Arguments $startupArgs
+if ($reply.ReturnValue -ne 0) { throw ('Files installed, but Windows startup registration failed: ' + $reply.ReturnValue) }
+$expectedCommand = $startupArgs.sValue
+$startupArgs.Remove('sValue')
+$readback = Invoke-CimMethod -Namespace root/default -ClassName StdRegProv -MethodName GetStringValue -Arguments $startupArgs
+if ($readback.ReturnValue -ne 0 -or $readback.sValue -ne $expectedCommand) { throw 'Windows startup readback mismatch' }
 Write-Output "Installed: $folder"
+$desktop = [Environment]::GetFolderPath('DesktopDirectory')
+$shortcutPath = Join-Path $desktop 'Minimalist Control Center.lnk'
+$shellLink = New-Object -ComObject WScript.Shell
+$shortcut = $shellLink.CreateShortcut($shortcutPath)
+if ((Test-Path -LiteralPath $shortcutPath) -and $shortcut.TargetPath -and
+    -not $shortcut.TargetPath.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Desktop shortcut already points outside this installation. It was not replaced.'
+}
+$shortcut.TargetPath = Join-Path $folder 'mcc-ui.exe'
+$shortcut.WorkingDirectory = $folder
+$shortcut.Arguments = ''
+$shortcut.Description = 'Minimalist Control Center'
+$shortcut.Save()
+Write-Output "Desktop shortcut: $shortcutPath"
 Write-Output 'Starts in the tray at sign-in. Enable controls still needs administrator approval. No hardware settings were changed.'

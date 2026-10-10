@@ -300,10 +300,9 @@ pub fn keyboard(config: &Lighting) -> Result<(), String> {
             .send_feature_report(&transfer.effect)
             .map_err(|e| e.to_string())?;
         std::thread::sleep(Duration::from_millis(2));
-        device
-            .send_feature_report(&transfer.picture)
-            .map_err(|e| e.to_string())?;
-        for _ in 0..8 {
+        for row in &transfer.row_select {
+            device.send_feature_report(row).map_err(|e| e.to_string())?;
+            std::thread::sleep(Duration::from_millis(2));
             if device.write(&transfer.pixels).map_err(|e| e.to_string())? != transfer.pixels.len() {
                 return Err("Short keyboard output transfer".into());
             }

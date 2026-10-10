@@ -36,6 +36,9 @@ const BOOST: u16 = 104;
 const QUIET: u16 = 105;
 const STARTUP: u16 = 124;
 const CUSTOM: u16 = 125;
+const REGULAR: u16 = 126;
+const SAVE_CUSTOM: u16 = 127;
+const APPLY_CUSTOM: u16 = 128;
 const BALANCED: u16 = 106;
 const PERFORMANCE: u16 = 107;
 const APPLY_LIGHT: u16 = 108;
@@ -91,6 +94,9 @@ enum Job {
     Poll,
     ReconnectPoll,
     Preset(Preset),
+    Fan(FanMode),
+    Power(PowerPlan),
+    Combination(FanMode, PowerPlan),
     Startup(bool),
     Switch(Switch, bool),
     Light(Lighting),
@@ -196,6 +202,33 @@ fn operation(job: &Job) -> Result<Completed, String> {
             } else {
                 "Windows startup disabled."
             }
+        }
+        Job::Fan(mode) => {
+            mcc::presets::apply_combination(
+                Some(*mode),
+                None,
+                |f| call(&fan_args(f)).map(|_| ()),
+                mcc::desktop::power,
+            )?;
+            "Fan cooling updated. Windows performance setting was preserved."
+        }
+        Job::Power(plan) => {
+            mcc::presets::apply_combination(
+                None,
+                Some(*plan),
+                |f| call(&fan_args(f)).map(|_| ()),
+                mcc::desktop::power,
+            )?;
+            "Windows performance updated. Fan mode was preserved."
+        }
+        Job::Combination(fan, power) => {
+            mcc::presets::apply_combination(
+                Some(*fan),
+                Some(*power),
+                |f| call(&fan_args(f)).map(|_| ()),
+                mcc::desktop::power,
+            )?;
+            "Custom fan/performance combination applied. Lighting was preserved."
         }
         Job::Preset(p) => {
             mcc::presets::apply(
@@ -322,6 +355,8 @@ fn worker_with(
             | Job::Status
             | Job::ReconnectPoll
             | Job::Preset(_)
+            | Job::Fan(_)
+            | Job::Combination(_, _)
             | Job::Switch(_, _)
             | Job::Restore
     );
@@ -374,6 +409,12 @@ fn demo_caps() -> mcc::control::Capabilities {
 fn demo_worker(job: Job, c: &mut mcc::control::Capabilities, fail: &mut bool) -> Completed {
     let mut r = Completed::message("Preview only · no hardware changes.");
     match job {
+        Job::Fan(f) => c.fan_mode_raw = f.byte(),
+        Job::Power(p) => r.power = Some(p),
+        Job::Combination(f, p) => {
+            c.fan_mode_raw = f.byte();
+            r.power = Some(p);
+        }
         Job::Preset(p) => {
             c.fan_mode_raw = p.fan().byte();
             r.power = p.power();
@@ -503,7 +544,14 @@ impl App {
                 passed &= (style & WS_VISIBLE != 0) == expected;
                 if matches!(
                     b.id,
-                    QUIET | BALANCED | PERFORMANCE | BOOST | KEY | USB | BAR | APPLY_LIGHT
+                    AUTO | BOOST
+                        | REGULAR
+                        | SAVE_CUSTOM
+                        | APPLY_CUSTOM
+                        | KEY
+                        | USB
+                        | BAR
+                        | APPLY_LIGHT
                 ) {
                     passed &= style & WS_DISABLED != 0;
                 }
@@ -651,7 +699,12 @@ impl App {
                 KEY => self.session.ready() && c.is_some_and(|c| c.windows_key_lock),
                 USB => self.session.ready() && c.is_some_and(|c| c.usb_charging),
                 BAR => self.session.ready() && c.is_some_and(|c| c.light_bar),
-                QUIET | BALANCED | PERFORMANCE => self.session.ready(),
+                QUIET | BALANCED | PERFORMANCE => !self.session.busy,
+                REGULAR | SAVE_CUSTOM => self.session.ready(),
+                APPLY_CUSTOM => {
+                    self.session.ready()
+                        && self.settings.profiles.iter().any(|p| p.name == "Custom")
+                }
                 GPU_TEMP | STARTUP => !self.session.busy,
                 _ => true,
             };
@@ -908,18 +961,97 @@ impl App {
                 self.refresh_controls();
             }
             CONNECT => self.connect(),
-            BOOST => {
+            AUTO | BOOST => {
                 if self.session.ready() {
-                    self.submit(Job::Preset(Preset::Turbo));
+                    self.submit(Job::Fan(if id == BOOST {
+                        FanMode::Boost
+                    } else {
+                        FanMode::Auto
+                    }));
                 }
             }
-            QUIET | BALANCED | PERFORMANCE | AUTO => {
-                if self.session.ready() {
-                    self.submit(Job::Preset(match id {
-                        QUIET => Preset::Office,
-                        PERFORMANCE => Preset::High,
-                        _ => Preset::Balanced,
+            QUIET | BALANCED | PERFORMANCE => {
+                if !self.session.busy {
+                    self.submit(Job::Power(match id {
+                        QUIET => PowerPlan::PowerSaver,
+                        PERFORMANCE => PowerPlan::HighPerformance,
+                        _ => PowerPlan::Balanced,
                     }));
+                }
+            }
+            REGULAR => {
+                if self.session.ready() {
+                    if let Some(i) = self.choose(
+                        id,
+                        &[
+                            "Office: Adaptive + Power Saver",
+                            "Balanced: Adaptive + Balanced",
+                            "High: Adaptive + Performance",
+                            "Turbo: Boost, keep performance",
+                        ],
+                        1,
+                    ) {
+                        self.submit(Job::Preset(
+                            [
+                                Preset::Office,
+                                Preset::Balanced,
+                                Preset::High,
+                                Preset::Turbo,
+                            ][i],
+                        ));
+                    }
+                }
+            }
+            SAVE_CUSTOM => {
+                if self.session.ready() {
+                    let fan =
+                        self.session
+                            .capabilities
+                            .as_ref()
+                            .and_then(|c| match c.fan_mode_raw {
+                                0 => Some(FanMode::Auto),
+                                64 => Some(FanMode::Boost),
+                                _ => None,
+                            });
+                    if let (Some(fan), Some(power)) = (fan, self.power) {
+                        let mut settings = self.settings.clone();
+                        settings.profiles.retain(|p| p.name != "Custom");
+                        settings.profiles.push(mcc::settings::Profile {
+                            name: "Custom".into(),
+                            fan,
+                            power,
+                            lighting: self.lighting.clone(),
+                        });
+                        let result = if self.demo {
+                            Ok(())
+                        } else {
+                            std::env::current_exe()
+                                .map_err(|e| e.to_string())
+                                .and_then(|p| settings.save(&p.with_file_name("profiles.json")))
+                        };
+                        match result {
+                            Ok(()) => {
+                                self.settings = settings;
+                                self.message = "Saved the current fan + performance combination. It will not apply automatically.".into();
+                                self.error = false;
+                            }
+                            Err(e) => {
+                                self.message = format!("Could not save custom combination: {e}");
+                                self.error = true;
+                            }
+                        }
+                    } else {
+                        self.message = "Refresh first: a verified fan mode and Windows power plan are required to save.".into();
+                        self.error = true;
+                    }
+                    self.refresh_controls();
+                }
+            }
+            APPLY_CUSTOM => {
+                if self.session.ready() {
+                    if let Some(p) = self.settings.profiles.iter().find(|p| p.name == "Custom") {
+                        self.submit(Job::Combination(p.fan, p.power));
+                    }
                 }
             }
             STARTUP => {
@@ -1157,7 +1289,16 @@ impl App {
     fn paint(&self, dc: HDC) {
         self.round(dc, self.rect(0, 0, 720, 708), BG, BG, 0);
         self.label(dc, "Minimalist", 32, 26, 420, 34, 2, INK);
-        self.label(dc, &self.model, 32, 65, 420, 24, 3, MUTED);
+        self.label(
+            dc,
+            &format!("{} · v{}", self.model, env!("CARGO_PKG_VERSION")),
+            32,
+            65,
+            420,
+            24,
+            3,
+            MUTED,
+        );
         self.label(
             dc,
             if self.demo {
@@ -1176,16 +1317,16 @@ impl App {
         );
         match self.page {
             Page::Cooling => {
-                self.label(dc, "Cooling", 32, 171, 380, 34, 2, INK);
-                self.round(dc, self.rect(32, 219, 656, 255), WHITE, BORDER, 16);
-                self.label(dc, "FAN MODE", 52, 238, 230, 24, 3, MUTED);
+                self.label(dc, "Cooling & performance", 32, 171, 640, 34, 2, INK);
+                self.round(dc, self.rect(32, 219, 656, 186), WHITE, BORDER, 16);
+                self.label(dc, "FAN COOLING", 52, 233, 250, 24, 3, MUTED);
                 self.label(
                     dc,
                     mcc::session::fan_label(
                         self.session.capabilities.as_ref().map(|c| c.fan_mode_raw),
                     ),
                     412,
-                    238,
+                    233,
                     256,
                     24,
                     1,
@@ -1193,21 +1334,22 @@ impl App {
                 );
                 self.label(
                     dc,
-                    "Adaptive cooling responds to heat. Turbo requests firmware boost.",
+                    "WINDOWS PERFORMANCE · independent of fan mode",
                     52,
-                    439,
+                    315,
                     616,
-                    25,
+                    24,
                     3,
                     MUTED,
                 );
+                self.label(dc, "Presets & your combination", 32, 420, 656, 24, 1, INK);
                 self.label(
                     dc,
-                    "Office reduces CPU power; High favors performance. Neither fixes fan speed.",
+                    "Choose fan + performance above, then save your combination.",
                     32,
-                    486,
+                    477,
                     656,
-                    34,
+                    22,
                     3,
                     MUTED,
                 );
@@ -1322,17 +1464,19 @@ impl App {
             COOLING => self.page == Page::Cooling,
             LIGHTING => self.page == Page::Lighting,
             SETTINGS => self.page == Page::Settings,
-            QUIET | AUTO | BALANCED | PERFORMANCE | BOOST => {
-                Preset::observed(
-                    self.session.capabilities.as_ref().map(|c| c.fan_mode_raw),
-                    self.power,
-                ) == Some(match id {
-                    QUIET => Preset::Office,
-                    PERFORMANCE => Preset::High,
-                    BOOST => Preset::Turbo,
-                    _ => Preset::Balanced,
-                })
-            }
+            AUTO => self
+                .session
+                .capabilities
+                .as_ref()
+                .is_some_and(|c| c.fan_mode_raw == 0),
+            BOOST => self
+                .session
+                .capabilities
+                .as_ref()
+                .is_some_and(|c| c.fan_mode_raw == 64),
+            QUIET => self.power == Some(PowerPlan::PowerSaver),
+            BALANCED => self.power == Some(PowerPlan::Balanced),
+            PERFORMANCE => self.power == Some(PowerPlan::HighPerformance),
             STARTUP => self.startup,
             KEY => self
                 .session
@@ -1412,40 +1556,6 @@ impl App {
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                 );
             }
-        } else if matches!(id, QUIET | BALANCED | PERFORMANCE | AUTO | BOOST) {
-            let p = self.px(18);
-            r.left += p;
-            r.top += self.px(12);
-            r.right -= p;
-            let mut title = r;
-            title.bottom = title.top + self.px(25);
-            self.draw_text(
-                d.hDC,
-                match id {
-                    QUIET => "Office",
-                    PERFORMANCE => "High",
-                    BOOST => "Turbo",
-                    _ => "Balanced · adaptive",
-                },
-                title,
-                1,
-                color,
-                DT_LEFT | DT_SINGLELINE,
-            );
-            r.top += self.px(30);
-            self.draw_text(
-                d.hDC,
-                match id {
-                    QUIET => "Adaptive fans · lower CPU power",
-                    PERFORMANCE => "Adaptive fans · favor performance",
-                    BOOST => "Cooling boost · more fan noise",
-                    _ => "Cooling follows your workload",
-                },
-                r,
-                3,
-                color,
-                DT_LEFT | DT_SINGLELINE,
-            );
         } else {
             let choice = matches!(id, EFFECT | BRIGHTNESS | SPEED | DIRECTION);
             if choice {
@@ -1809,15 +1919,29 @@ pub fn run() {
     let c = Some(Page::Cooling);
     let l = Some(Page::Lighting);
     let s = Some(Page::Settings);
-    a.button("Office", QUIET, c, (52, 273, 298, 70));
-    a.button("Balanced · adaptive", BALANCED, c, (370, 273, 298, 70));
-    a.button("High", PERFORMANCE, c, (52, 354, 298, 70));
-    a.button("Turbo", BOOST, c, (370, 354, 298, 70));
     a.button(
-        "Minimum-noise / custom fans · not yet verified",
+        "Adaptive · firmware controlled",
+        AUTO,
+        c,
+        (52, 268, 298, 36),
+    );
+    a.button("Turbo · cooling boost", BOOST, c, (370, 268, 298, 36));
+    a.button("Power Saver", QUIET, c, (52, 349, 194, 36));
+    a.button("Balanced", BALANCED, c, (262, 349, 194, 36));
+    a.button("Performance", PERFORMANCE, c, (474, 349, 194, 36));
+    a.button(
+        "Regular presets: Office / Balanced / High / Turbo",
+        REGULAR,
+        c,
+        (32, 447, 656, 28),
+    );
+    a.button("Save current as Custom", SAVE_CUSTOM, c, (32, 505, 318, 32));
+    a.button("Apply saved Custom", APPLY_CUSTOM, c, (370, 505, 318, 32));
+    a.button(
+        "Custom fan curves: awaiting thermal validation",
         CUSTOM,
         c,
-        (32, 528, 656, 36),
+        (32, 542, 656, 28),
     );
     a.button("Apply keyboard", APPLY_LIGHT, l, (496, 236, 172, 36));
     a.button("Solid", EFFECT, l, (52, 307, 286, 34));
@@ -1967,6 +2091,44 @@ mod tests {
         );
         assert!(r.error);
         assert!(!r.status_failed);
+    }
+    #[test]
+    fn independent_performance_changes_never_request_firmware_status() {
+        for plan in [
+            PowerPlan::PowerSaver,
+            PowerPlan::Balanced,
+            PowerPlan::HighPerformance,
+        ] {
+            let r = worker_with(
+                Job::Power(plan),
+                |_| Ok(Completed::message("power changed")),
+                || panic!("Independent performance must not access firmware"),
+            );
+            assert!(!r.error && !r.status_failed);
+            assert!(r.status.is_none());
+        }
+    }
+    #[test]
+    fn independent_fan_and_performance_preserve_the_other_setting() {
+        let mut c = demo_caps();
+        c.fan_mode_raw = 64;
+        let r = demo_worker(Job::Power(PowerPlan::PowerSaver), &mut c, &mut false);
+        assert_eq!(c.fan_mode_raw, 64);
+        assert_eq!(r.power, Some(PowerPlan::PowerSaver));
+        let r = demo_worker(Job::Fan(FanMode::Auto), &mut c, &mut false);
+        assert_eq!(c.fan_mode_raw, 0);
+        assert!(r.power.is_none());
+        for fan in [FanMode::Auto, FanMode::Boost] {
+            for plan in [
+                PowerPlan::PowerSaver,
+                PowerPlan::Balanced,
+                PowerPlan::HighPerformance,
+            ] {
+                let r = demo_worker(Job::Combination(fan, plan), &mut c, &mut false);
+                assert_eq!(c.fan_mode_raw, fan.byte());
+                assert_eq!(r.power, Some(plan));
+            }
+        }
     }
     #[test]
     fn passive_full_recovery_reads_once_and_failed_narrow_poll_discards_state() {

@@ -1,5 +1,7 @@
 # Minimalist Control Center — implementation plan
 
+Current missing-feature checklist: [Missing features and known issues](docs/MISSING_FEATURES.md), updated 10 October 2026. Includes the owner's report that lighting changes only one side of the keyboard. The implementation history below is not the current completion checklist.
+
 Prepared 9 October 2026. Target: the user's Monster Tulpar T5 V17.1 / reported Tongfang GK5CN6Z, Windows, Intel Core i7-8750H and NVIDIA GeForce GTX 1060.
 
 Current status: v0.2 includes a native GUI, real automatic/boost control and reversible OEM launcher handover. A short hardware test and audible response were confirmed. Full parity and extended thermal validation remain unfinished: see CONTINUATION.md and docs/SAFETY.md. The initial investigation below is historical; its unavailable/not-changed statements describe that earlier stage.

@@ -1,6 +1,26 @@
 //! Workload presets use only autonomous firmware cooling and standard Windows plans.
 //! They are not fixed fan speeds or replacements for the unverified OEM Office tables.
 use crate::{control::FanMode, settings::PowerPlan};
+pub fn apply_combination(
+    fan_mode: Option<FanMode>,
+    plan: Option<PowerPlan>,
+    mut fan: impl FnMut(FanMode) -> Result<(), String>,
+    mut power: impl FnMut(PowerPlan) -> Result<(), String>,
+) -> Result<(), String> {
+    if let Some(mode) = fan_mode {
+        fan(mode)?;
+    }
+    if let Some(plan) = plan {
+        power(plan).map_err(|e| {
+            if fan_mode.is_some() {
+                format!("Fan mode applied; Windows performance failed: {e}")
+            } else {
+                e
+            }
+        })?;
+    }
+    Ok(())
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
     Office,
@@ -50,6 +70,40 @@ pub fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn independent_operations_never_call_the_other_backend() {
+        apply_combination(
+            Some(FanMode::Boost),
+            None,
+            |_| Ok(()),
+            |_| panic!("power changed"),
+        )
+        .unwrap();
+        apply_combination(
+            None,
+            Some(PowerPlan::PowerSaver),
+            |_| panic!("fan changed"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(
+            apply_combination(
+                Some(FanMode::Auto),
+                Some(PowerPlan::HighPerformance),
+                |_| Err("fan failed".into()),
+                |_| panic!("power must not change after fan failure")
+            )
+            .is_err()
+        );
+        let e = apply_combination(
+            Some(FanMode::Boost),
+            Some(PowerPlan::Balanced),
+            |_| Ok(()),
+            |_| Err("plan failed".into()),
+        )
+        .unwrap_err();
+        assert!(e.contains("Fan mode applied"));
+    }
     #[test]
     fn every_non_turbo_preset_restores_autonomous_cooling() {
         for p in [Preset::Office, Preset::Balanced, Preset::High] {

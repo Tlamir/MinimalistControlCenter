@@ -2,7 +2,7 @@
 
 Native Rust/Win32 controls for **MONSTER TULPAR T5 V17.1 / BIOS N.1.06 / i7-8750H / GTX 1060**. No browser runtime, proprietary DLL, new driver or continuously running fan algorithm.
 
-**v0.4 adds automatic fan-state synchronization, clearer workload presets, and optional Windows logon startup.** Cooling, Lighting and Settings remain native pages. Full feature parity and extended thermal validation remain unfinished.
+**v0.5 adds separate fan/performance controls, keeps regular presets, and saves a custom combination.** Cooling, Lighting and Settings remain native pages. Full feature parity and extended thermal validation remain unfinished.
 
 v0.4.2 resolves the physical executable path for elevation and startup, and installs outside package-redirected AppData folders. Earlier installations created from a packaged terminal could report Windows error 3 when enabling controls. The owner confirmed Enable controls and physical turbo-button/UI synchronization on the target laptop. Automatic light-bar-off after restart is requested but not yet supported.
 
@@ -10,14 +10,14 @@ v0.4.2 resolves the physical executable path for elevation and startup, and inst
 
 Keep **mcc-ui.exe** and **mcc.exe** together. Open mcc-ui.exe. Startup reads OS counters and applies nothing.
 
-For a stable per-user installation with tray startup, extract the release and run `powershell -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1`. This copies the version into `%USERPROFILE%\Applications\MinimalistControlCenter\0.4.2`, verifies both binary copies, and registers the quoted UI path in your Windows sign-in startup. It does not need administrator access. To disable startup, use Settings or `mcc.exe startup off`. A later release installs beside the old one before replacing the startup entry; different builds cannot overwrite an existing version through this installer.
+For a stable per-user installation with tray startup, extract the release and run `powershell -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1`. This creates/updates a single **Minimalist Control Center** desktop shortcut, preserves the previous installed version's preferences when present, and copies the version into `%USERPROFILE%\Applications\MinimalistControlCenter\0.5.0`, verifies both binary copies, and registers the quoted UI path in your Windows sign-in startup. It does not need administrator access. To disable startup, use Settings or `mcc.exe startup off`. A later release installs beside the old one before replacing the startup entry; different builds cannot overwrite an existing version through this installer.
 
-When installing or launching from a packaged terminal, Windows may redirect registry writes into that terminal's private registry. Prefer a normal Windows PowerShell/Explorer launch. Same-process startup readback alone does not prove that Windows sign-in sees the registration; verify it in Windows Startup Apps. This package-host edge case still needs automatic handling in the startup toggle.
+The installer registers startup through Windows' registry provider and verifies it there, avoiding packaged-terminal registry redirection. The in-app startup toggle still uses native registry APIs and needs further handling when the app inherits a packaged launch context. A real restart remains an owner check.
 
 1. Exit Monster Kontrol Merkezi, including its tray icon.
 2. Click **Enable controls** and accept the Windows administrator prompt. The app reads capabilities and pauses the reviewed OEM launcher if needed. Its startup configuration stays unchanged. If the original controller is using a different preset, set automatic cooling there before exiting it.
-3. In **Cooling**, choose a workload preset. **Office** uses firmware adaptive cooling and Windows Power Saver; **Balanced** uses adaptive cooling and Windows Balanced; **High** uses adaptive cooling and Windows High Performance. **Turbo** selects firmware cooling boost and preserves the current power plan. These are workload presets, **not calibrated fixed fan speeds or the original OEM Office table**.
-4. The highlighted preset follows actual firmware mode and Windows power state. After enabling controls, background read-only checks run about every 2–3 seconds while visible and every 15–16 seconds in the tray, plus helper latency. Pressing the physical turbo button changes the display without an app command fighting it. Failed reads clear stale state and retry after 30 seconds.
+3. In **Cooling & performance**, use **Adaptive / Turbo** to change only the fan mode. **Power Saver / Balanced / Performance** change only the Windows power plan, preserving fan mode. **Regular presets** keeps Office (Adaptive + Power Saver), Balanced (Adaptive + Balanced), High (Adaptive + Performance), and Turbo (boost, keep power plan). Choose any supported combination and select **Save current as Custom**, then **Apply saved Custom** to recall it. Custom recall does not change keyboard lighting or apply automatically at startup. These are workload combinations, not OEM Office fan tables or manual curves.
+4. Fan and performance selections independently follow actual firmware mode and Windows power state. After enabling controls, background read-only checks run about every 2–3 seconds while visible and every 15–16 seconds in the tray, plus helper latency. Pressing the physical turbo button changes the display without an app command fighting it. Failed reads clear stale state and retry after 30 seconds.
 5. In **Lighting**, choose effect, brightness and color, then **Apply keyboard**. The light-bar switch applies immediately. Successful keyboard submissions save preferences, which never apply on startup.
 6. **Settings** contains Windows-key lock, hibernation USB charging, screen-off, opt-in GPU tools, and **Start with Windows**. Startup opens the current executable in the tray at sign-in, with no hardware writes or UAC prompt. **Enable controls is still required for administrator access after each login.** Keep the portable folder in place; moving it requires re-enabling startup. Windows Task Manager can also disable startup. Automatic privileged takeover is not installed.
 
@@ -26,6 +26,8 @@ Closing the window hides it to the tray and stops dashboard polling. **Exit app*
 The physical turbo button is not periodically overridden. **Refresh**, F5, or reopening the tray window rereads its mode. Its behavior with the OEM launcher paused still needs testing.
 
 ## Reliability
+
+Solid lighting on the first-generation per-key HID collection now addresses six rows of 21 LEDs explicitly instead of sending an unaddressed picture stream. Protocol coverage has a regression test; physical confirmation of the reported one-sided lighting defect is pending. This change is limited to Solid on usage page ff02; it does not claim all effects or keyboard variants are fixed.
 
 Light-bar and Windows-key commands wait for pending toggle pulses to be consumed, re-read current state, submit one pulse and poll acknowledgement with a bounded read loop. A delayed success is never blindly toggled back. After failed hardware actions, the GUI refreshes actual state: successful readback keeps controls usable; unavailable state disables writes. Failed writes are never automatically replayed.
 

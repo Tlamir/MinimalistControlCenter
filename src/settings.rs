@@ -134,4 +134,19 @@ mod tests {
         let p = Settings::parse(&serde_json::to_vec(&s).unwrap()).unwrap();
         assert_eq!(p.profiles[0].name, "Quiet");
     }
+    #[test]
+    fn custom_combinations_roundtrip_without_replacing_regular_profiles() {
+        let mut settings = Settings::default();
+        settings.profiles.push(Profile {
+            name: "Custom".into(),
+            fan: FanMode::Boost,
+            power: PowerPlan::PowerSaver,
+            lighting: Lighting::default(),
+        });
+        let restored = Settings::parse(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert_eq!(restored.profiles.len(), 4);
+        assert_eq!(restored.profiles[1].name, "Balanced");
+        assert_eq!(restored.profiles[3].fan, FanMode::Boost);
+        assert_eq!(restored.profiles[3].power, PowerPlan::PowerSaver);
+    }
 }
