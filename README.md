@@ -26,7 +26,7 @@ Office uses automatic cooling with Power Saver. Custom fan curves and the OEM mi
 
 ## Performance
 
-![Benchmark bars comparing RAM, CPU usage and idle window response](assets/benchmarks-idle-2026-10-11.svg)
+![Benchmark bars comparing RAM, CPU usage and idle window response](assets/benchmarks-idle-cpu-1pct.svg)
 
 Uses **25.4 MiB open / 14.1 MiB in the tray**, including its helper. The original app measured **175.8 MiB open / 171.8 MiB minimized**. Background polling stops when hidden.
 

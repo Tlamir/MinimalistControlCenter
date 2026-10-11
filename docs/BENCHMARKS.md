@@ -1,6 +1,6 @@
 # Benchmarks
 
-![Original control center vs. Minimalist: RAM, CPU and idle window reply](../assets/benchmarks-idle-2026-10-11.svg)
+![Original control center vs. Minimalist: RAM, CPU and idle window reply](../assets/benchmarks-idle-cpu-1pct.svg)
 
 | App / state | RAM, resident | CPU, whole PC | Idle reply, p95 |
 |---|---:|---:|---:|
@@ -11,7 +11,7 @@
 
 Minimalist used less RAM in these sessions. The original app's idle default page used less CPU than Minimalist's connected Cooling page. Different pages and power settings mean this is not a controlled comparison of speed or energy use. Battery life was not measured.
 
-The CPU chart uses the full 0-100% scale, with exact labels: both open averages were below 0.1%. Minimized/tray rows show background idle usage. Minimalist's observed zero is below counter resolution, not a guarantee of no CPU activity.
+The CPU chart uses a fixed 0-1% scale, with exact labels: both open averages were below 0.1%. Minimized/tray rows show background idle usage. Minimalist's observed zero is below counter resolution, not a guarantee of no CPU activity.
 
 ## Method
 

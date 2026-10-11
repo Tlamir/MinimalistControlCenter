@@ -41,14 +41,13 @@ def main():
              average('candidate-visible', 'window_ping_p95_ms')]
     panels = [
         ('RAM used', 'MiB - resident', ram, names, colors, max(ram)*1.5, lambda v: f'{v:.1f}'),
-        ('CPU usage', '% - whole PC (0-100)', cpu, names, colors, 100, lambda v: f'{v:.3f}%' if v else '0% observed*'),
+        ('CPU usage', '% - whole PC (0-1% scale)', cpu, names, colors, 1, lambda v: f'{v:.3f}%' if v else '0% observed*'),
         ('Idle window reply', 'ms - p95 (open)', reply, names[:2], [old, new], max(reply)*1.55, lambda v: f'{v:.3f}'),
     ]
     for ax, (title, unit, values, names, colors, xmax, fmt) in zip(axes, panels):
         ys = range(len(values))
         if title == 'CPU usage':
-            ax.barh(ys, [100] * len(values), height=.5, color='#edf1f3', zorder=1)
-            ax.set_xticks([0, 50, 100])
+            ax.set_xticks([0, .25, .5, .75, 1], ['0%', '0.25%', '0.5%', '0.75%', '1%'])
         ax.barh(ys, values, height=.5, color=colors, zorder=3)
         ax.set_yticks(ys, names, fontsize=8.5)
         ax.set_ylim(3.65, -.65)
@@ -64,8 +63,8 @@ def main():
     fig.text(.035, .20, 'Original: AC / Power Saver, default page. Minimalist 0.8.0: battery / Balanced, connected Cooling page.', fontsize=9, color='#52616b')
     fig.text(.035, .14, 'Both apps averaged less than 0.1% CPU open. * Zero means below counter resolution during the 30s tray test.', fontsize=9, color='#52616b')
     fig.text(.035, .08, 'Includes app helpers. Conditions differ; battery savings unmeasured. Idle replies are window messages, not clicks.', fontsize=9, color='#52616b')
-    fig.savefig(ROOT / 'assets/benchmarks-idle-2026-10-11.svg', metadata={'Creator': 'scripts/plot_benchmarks.py', 'Date': DATA['date_utc']})
-    svg = ROOT / 'assets/benchmarks-idle-2026-10-11.svg'
+    fig.savefig(ROOT / 'assets/benchmarks-idle-cpu-1pct.svg', metadata={'Creator': 'scripts/plot_benchmarks.py', 'Date': DATA['date_utc']})
+    svg = ROOT / 'assets/benchmarks-idle-cpu-1pct.svg'
     svg.write_text('\n'.join(line.rstrip() for line in svg.read_text(encoding='utf-8').splitlines()) + '\n', encoding='utf-8')
     fig.savefig(ROOT / 'assets/benchmarks.png', dpi=160, metadata={'Software': 'scripts/plot_benchmarks.py'})
     plt.close(fig)
