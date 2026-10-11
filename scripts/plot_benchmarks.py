@@ -24,28 +24,26 @@ def main():
     })
     fig, axes = plt.subplots(1, 3, figsize=(12, 5.2))
     fig.subplots_adjust(left=.13, right=.94, top=.72, bottom=.32, wspace=.8)
-    old_cpu = average('baseline-visible', 'cpu_percent_whole_machine')
-    new_cpu = average('candidate-visible', 'cpu_percent_whole_machine')
-    reduction = 100 * (1 - new_cpu / old_cpu)
-    fig.text(.035, .93, f'{reduction:.0f}% less CPU with Cooling open', fontsize=21, weight='bold')
-    fig.text(.035, .865, 'Minimalist 0.8.0 vs. 0.7.2  ·  lower is better', fontsize=11, color='#52616b')
-    old, new, light = '#788995', '#087f6b', '#a6b2bb'
-    ram_labels = ['Original open*', '0.7.2 open', '0.8.0 open', '0.8.0 tray']
-    ram = [average('oem-visible', 'median_working_set_bytes', OEM) / 2**20]
-    ram += [average(p, 'median_working_set_bytes') / 2**20
-            for p in ['baseline-visible', 'candidate-visible', 'candidate-tray']]
-    cpu = [old_cpu, new_cpu, average('candidate-tray', 'cpu_percent_whole_machine')]
-    reply = [average(p, 'window_ping_p95_ms') for p in ['baseline-visible', 'candidate-visible']]
+    fig.text(.035, .93, 'Original control center vs. Minimalist', fontsize=21, weight='bold')
+    fig.text(.035, .865, 'Measured on the same laptop in separate sessions; conditions differ', fontsize=11, color='#52616b')
+    old, new = '#788995', '#087f6b'
+    names = ['Original open', 'Minimalist open']
+    ram = [average('oem-visible', 'median_working_set_bytes', OEM) / 2**20,
+           average('candidate-visible', 'median_working_set_bytes') / 2**20]
+    cpu = [average('oem-visible', 'cpu_percent_whole_machine', OEM),
+           average('candidate-visible', 'cpu_percent_whole_machine')]
+    reply = [average('oem-visible', 'window_ping_p95_ms', OEM),
+             average('candidate-visible', 'window_ping_p95_ms')]
     panels = [
-        ('RAM used', 'MiB · resident', ram, ram_labels, [light, old, new, new], 230, lambda v: f'{v:.1f}'),
-        ('CPU usage', '% · whole PC', cpu, ['0.7.2 open', '0.8.0 open', '0.8.0 tray'], [old, new, new], max(cpu)*1.55, lambda v: f'{v:.3f}%'),
-        ('Idle window reply', 'ms · p95', reply, ['0.7.2 open', '0.8.0 open'], [old, new], max(reply)*1.55, lambda v: f'{v:.3f}'),
+        ('RAM used', 'MiB - resident', ram, names, [old, new], max(ram)*1.5, lambda v: f'{v:.1f}'),
+        ('CPU usage', '% - whole PC', cpu, names, [old, new], max(cpu)*1.65, lambda v: f'{v:.3f}%'),
+        ('Idle window reply', 'ms - p95', reply, names, [old, new], max(reply)*1.55, lambda v: f'{v:.3f}'),
     ]
     for ax, (title, unit, values, names, colors, xmax, fmt) in zip(axes, panels):
         ys = range(len(values))
         ax.barh(ys, values, height=.5, color=colors, zorder=3)
         ax.set_yticks(ys, names, fontsize=8.5)
-        ax.set_ylim(3.65, -.65)
+        ax.set_ylim(1.65, -.65)
         ax.set_xlim(0, xmax)
         ax.set_xlabel(unit, fontsize=10, labelpad=9)
         ax.set_title(title, fontsize=12, weight='bold', loc='left', pad=17)
@@ -55,10 +53,9 @@ def main():
             spine.set_visible(False)
         for y, value in zip(ys, values):
             ax.text(value + xmax*.035, y, fmt(value), va='center', fontsize=9, weight='bold')
-    supply = DATA['power_source'].lower()
-    fig.text(.035, .20, f'Native versions: Balanced / {supply}, i7-8750H / GTX 1060. Two 30s open runs; one 30s tray run each.', fontsize=9, color='#52616b')
-    fig.text(.035, .14, '* Original RAM: earlier AC / Power Saver test. Includes native helper CPU and RAM; shared Windows hosts excluded.', fontsize=9, color='#52616b')
-    fig.text(.035, .08, 'Idle reply measures window messages, not clicks. Zero CPU means below counter resolution. Full method and raw data linked below.', fontsize=9, color='#52616b')
+    fig.text(.035, .20, 'Original: AC / Power Saver, default page. Minimalist 0.8.0: battery / Balanced, connected Cooling page.', fontsize=9, color='#52616b')
+    fig.text(.035, .14, 'Two 30s open runs each. Includes app helpers and OEM launcher service; shared Windows hosts excluded.', fontsize=9, color='#52616b')
+    fig.text(.035, .08, 'Not a controlled speed or energy comparison. Idle replies are window messages, not clicks. See the linked method.', fontsize=9, color='#52616b')
     fig.savefig(ROOT / 'assets/benchmarks.svg', metadata={'Creator': 'scripts/plot_benchmarks.py', 'Date': DATA['date_utc']})
     svg = ROOT / 'assets/benchmarks.svg'
     svg.write_text('\n'.join(line.rstrip() for line in svg.read_text(encoding='utf-8').splitlines()) + '\n', encoding='utf-8')

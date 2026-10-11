@@ -28,11 +28,9 @@ Office uses automatic cooling with Power Saver. Custom fan curves and the OEM mi
 
 ![Benchmark bars comparing RAM, CPU usage and idle window response](assets/benchmarks.svg)
 
-**88% less CPU than v0.7.2** with Cooling open. Uses **25.4 MiB open / 14.1 MiB in the tray**, including its helper. Background polling stops when hidden.
+Uses **25.4 MiB open / 14.1 MiB in the tray**, including its helper. The original app measured **175.8 MiB open / 171.8 MiB minimized**. Background polling stops when hidden.
 
-Same laptop, Balanced on battery; two 30-second open runs. Original RAM is from an earlier AC / Power Saver test. Response measures idle messages, not clicks. [Results and method](docs/BENCHMARKS.md).
-
-Lower CPU activity may reduce power use. Battery-life savings have not been measured.
+Same laptop, different power settings and pages. These measurements show memory use, CPU activity and idle window replies; they do not establish faster controls or longer battery life. [Results and method](docs/BENCHMARKS.md).
 
 ## Laptops
 
