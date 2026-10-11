@@ -170,6 +170,7 @@ fn hardware(action: cli::HardwareAction) -> Result<(), String> {
     {
         use cli::HardwareAction;
         match action {
+            HardwareAction::ObserveLoop => mcc::hardware::observe_loop(),
             HardwareAction::Observe => match mcc::hardware::observe() {
                 Ok(observation) => pretty(&json!({"ok":true,"observation":observation})),
                 Err(e) => pretty(&json!({"ok":false,"error":e})),

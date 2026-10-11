@@ -124,3 +124,30 @@ fn actual_native_ui_remains_responsive_during_a_slow_worker() {
     assert_eq!(report["pages_isolated_and_startup_writes_disabled"], true);
     assert!(report["ticks_during_worker_delay"].as_u64().unwrap() >= 3);
 }
+
+#[cfg(windows)]
+#[test]
+fn hidden_native_ui_recovers_from_a_slow_boot_without_hardware_access() {
+    let path = std::env::temp_dir().join(format!("mcc-boot-test-{}.json", std::process::id()));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mcc-ui"))
+        .args(["--self-test-startup", path.to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed() > Duration::from_secs(25) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("Hidden boot recovery did not finish its bounded self-test");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let _ = std::fs::remove_file(path);
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["hidden"], true);
+    assert_eq!(report["startup_recovery_test"], true);
+    assert_eq!(report["startup_attempts"], 2);
+    assert_eq!(report["hardware_accessed"], false);
+    assert_eq!(report["dashboard_us"], 0);
+}

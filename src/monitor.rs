@@ -18,7 +18,7 @@ impl Monitor {
         self.next_ms = now_ms.saturating_add(if failed {
             30_000
         } else if visible {
-            2_000
+            5_000
         } else {
             15_000
         });
@@ -46,16 +46,16 @@ mod tests {
             ..Default::default()
         };
         m.completed(0, true, false);
-        assert!(!m.due(1999, false));
-        assert!(m.due(2000, false));
-        m.completed(2000, false, false);
-        assert!(!m.due(16999, false));
-        assert!(m.due(17000, false));
-        m.completed(17000, true, true);
-        assert!(!m.due(46999, false));
-        assert!(m.due(47000, false));
-        m.completed(47000, false, false);
+        assert!(!m.due(4999, false));
+        assert!(m.due(5000, false));
+        m.completed(5000, false, false);
+        assert!(!m.due(19999, false));
+        assert!(m.due(20000, false));
+        m.completed(20000, true, true);
+        assert!(!m.due(49999, false));
+        assert!(m.due(50000, false));
+        m.completed(50000, false, false);
         m.wake();
-        assert!(m.due(47001, false));
+        assert!(m.due(50001, false));
     }
 }

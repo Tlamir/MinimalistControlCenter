@@ -67,6 +67,8 @@ def main():
     repo_url = 'https://github.com/Tlamir/MinimalistControlCenter/blob/main/'
     bench.write_text(benchmark_text.replace(report_link.group(1), 'BENCHMARKS.json')
                      .replace('../assets/benchmarks.svg', 'benchmarks.svg')
+                     .replace('../assets/', 'https://raw.githubusercontent.com/Tlamir/MinimalistControlCenter/main/assets/')
+                     .replace('../reports/', repo_url + 'reports/')
                      .replace('../scripts/', repo_url + 'scripts/'), encoding='utf-8')
     (folder / 'VERSION').write_text(version + '\n', encoding='ascii')
     installed = ['mcc.exe', 'mcc-ui.exe', 'README.md', 'icon.svg', 'BENCHMARKS.md', 'FAN_SUPPORT.md',

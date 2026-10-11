@@ -8,6 +8,40 @@ pub struct Status {
     pub managed: bool,
 }
 
+/// Finite boot recovery, independent of dashboard polling or window visibility.
+#[derive(Default)]
+pub struct Recovery {
+    failures: u8,
+    next_ms: Option<u64>,
+}
+pub enum RecoveryOutcome {
+    Recovered,
+    RetryAfter(u32),
+    Exhausted,
+}
+impl Recovery {
+    pub fn completed(&mut self, now_ms: u64, verified: bool) -> RecoveryOutcome {
+        self.next_ms = None;
+        if verified {
+            return RecoveryOutcome::Recovered;
+        }
+        self.failures += 1;
+        if self.failures >= 3 {
+            return RecoveryOutcome::Exhausted;
+        }
+        let delay = if self.failures == 1 { 10_000 } else { 30_000 };
+        self.next_ms = Some(now_ms.saturating_add(delay as u64));
+        RecoveryOutcome::RetryAfter(delay)
+    }
+    pub fn due(&mut self, now_ms: u64, busy: bool) -> bool {
+        if busy || !self.next_ms.is_some_and(|time| now_ms >= time) {
+            return false;
+        }
+        self.next_ms = None;
+        true
+    }
+}
+
 pub fn command(executable: &str) -> Result<String, String> {
     if executable.contains(['"', '\0', '\r', '\n'])
         || !executable
@@ -86,6 +120,33 @@ pub use native::{launch, set, status};
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn boot_recovery_is_bounded_and_never_overlaps_requests() {
+        let mut r = Recovery::default();
+        assert!(matches!(
+            r.completed(1000, false),
+            RecoveryOutcome::RetryAfter(10_000)
+        ));
+        assert!(!r.due(10_999, false));
+        assert!(!r.due(11_000, true));
+        assert!(r.due(11_000, false));
+        assert!(!r.due(12_000, false));
+        assert!(matches!(
+            r.completed(12_000, false),
+            RecoveryOutcome::RetryAfter(30_000)
+        ));
+        assert!(r.due(42_000, false));
+        assert!(matches!(
+            r.completed(43_000, false),
+            RecoveryOutcome::Exhausted
+        ));
+        assert!(!r.due(u64::MAX, false));
+        assert!(matches!(
+            r.completed(44_000, true),
+            RecoveryOutcome::Recovered
+        ));
+        assert!(!r.due(u64::MAX, false));
+    }
     #[test]
     fn quoted_command_starts_hidden_without_elevation_or_control_arguments() {
         assert_eq!(

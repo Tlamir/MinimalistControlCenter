@@ -13,6 +13,8 @@ pub mod instance;
 pub mod lighting;
 pub mod monitor;
 #[cfg(windows)]
+pub mod observer;
+#[cfg(windows)]
 mod oem;
 pub mod platform;
 pub mod policy;

@@ -472,6 +472,21 @@ mod tests {
         assert!(m.writes.is_empty());
     }
     #[test]
+    fn boot_off_retry_consumes_a_late_pulse_without_turning_the_bar_back_on() {
+        let mut m = Mock::new();
+        m.values.insert(STATUS, 2);
+        m.delay = 50;
+        assert!(set_switch(&mut m, Switch::LightBar, false).is_err());
+        assert_eq!(m.writes, [(TRIGGER, 2)]);
+        // Reopening a slow provider must resolve the existing request before any new write.
+        assert!(set_switch(&mut m, Switch::LightBar, false).is_err());
+        assert_eq!(m.writes, [(TRIGGER, 2)]);
+        m.delay = 3;
+        set_switch(&mut m, Switch::LightBar, false).unwrap();
+        assert_eq!(m.values[&STATUS] & 2, 0);
+        assert_eq!(m.writes, [(TRIGGER, 2)]);
+    }
+    #[test]
     fn pending_request_must_be_consumed_even_if_old_state_matches_target() {
         let mut m = Mock::new();
         m.values.insert(TRIGGER, 2);

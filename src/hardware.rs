@@ -155,6 +155,9 @@ struct Service {
 fn check_competing_controller() -> Result<(), String> {
     let c = WMIConnection::with_namespace_path("root\\CIMV2")
         .map_err(|e| format!("Cannot check OEM ownership: {e}"))?;
+    check_competing_with(&c)
+}
+fn check_competing_with(c: &WMIConnection) -> Result<(), String> {
     let processes: Vec<Process> = c
         .raw_query("SELECT Name FROM Win32_Process WHERE Name='GamingCenter.exe' OR Name='OEMServiceWinApp.exe' OR Name='ControlCenter.exe' OR Name='GamingCenterU.exe'")
         .map_err(|e| format!("Cannot check running controllers: {e}"))?;
@@ -211,6 +214,36 @@ pub fn observe() -> Result<Observation, String> {
         mode,
         writes_allowed: ownership_reason.is_none(),
         ownership_reason,
+    })
+}
+
+/// Persistent read-only helper: reuse connections, never cache ownership or write permission.
+pub fn observe_loop() -> Result<(), String> {
+    struct Reader {
+        ec: NativeEc,
+        inventory: WMIConnection,
+    }
+    let mut reader: Option<Reader> = None;
+    crate::observer::serve(std::io::stdin().lock(), std::io::stdout().lock(), || {
+        if reader.is_none() {
+            reader = Some(Reader {
+                ec: NativeEc::connect()?,
+                inventory: WMIConnection::with_namespace_path("root\\CIMV2")
+                    .map_err(|e| format!("Cannot check OEM ownership: {e}"))?,
+            });
+        }
+        let reader = reader
+            .as_mut()
+            .ok_or("Observation connection unavailable")?;
+        // Hold the same mutex only for this read; release it before waiting for another request.
+        let _guard = Ownership::acquire()?;
+        let mode = control::observed_mode(&mut reader.ec)?;
+        let ownership_reason = check_competing_with(&reader.inventory).err();
+        Ok(Observation {
+            mode,
+            writes_allowed: ownership_reason.is_none(),
+            ownership_reason,
+        })
     })
 }
 

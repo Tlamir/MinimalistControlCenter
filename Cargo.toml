@@ -1,6 +1,6 @@
 [package]
 name = "minimalist-control-center"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.87"
 description = "Native Windows control center for verified Tongfang hardware"

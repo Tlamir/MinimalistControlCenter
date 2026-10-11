@@ -6,15 +6,15 @@ A lightweight Windows control center for **Tongfang GK5CN6Z** laptops.
 
 I built this because the original control center felt sluggish, used too much RAM, and kept turning the light bar on. I wanted a small tool with the controls I actually use.
 
-**[Download for Windows 11 · x64](https://github.com/Tlamir/MinimalistControlCenter/releases/latest/download/mcc-windows-x64-installer.zip)** · [All releases](https://github.com/Tlamir/MinimalistControlCenter/releases)
+**[Download for Windows 11 Â· x64](https://github.com/Tlamir/MinimalistControlCenter/releases/latest/download/mcc-windows-x64-installer.zip)** Â· [All releases](https://github.com/Tlamir/MinimalistControlCenter/releases)
 
 ## Install
 
 1. Exit the original control center and any older Minimalist app, including their tray icons.
-2. Download the ZIP above, right-click it → **Extract All**, then open the extracted folder.
+2. Download the ZIP above, right-click it â†’ **Extract All**, then open the extracted folder.
 3. Double-click **Install.cmd**, accept the administrator prompt, and open the desktop shortcut.
 
-Starts in the tray with Windows and turns the light bar off after sign-in. No repeated administrator prompts. Close hides the window; **Exit** quits. Remove it through Windows **Settings → Apps → Installed apps**.
+Starts in the tray with Windows and turns the light bar off after sign-in. No repeated administrator prompts. Close hides the window; **Exit** quits. Remove it through Windows **Settings â†’ Apps â†’ Installed apps**.
 
 ## Controls
 
@@ -28,9 +28,9 @@ Office uses automatic cooling with Power Saver. Custom fan curves and the OEM mi
 
 ![Benchmark bars comparing RAM, CPU usage and idle window response](assets/benchmarks.svg)
 
-About **91% less RAM** with the window open. Background polling stops in the tray. The open dashboard uses more CPU than the original's idle page; the response test measures idle window messages, not clicks or gaming performance.
+**88% less CPU than v0.7.2** with Cooling open. Uses **25.4 MiB open / 14.1 MiB in the tray**, including its helper. Background polling stops when hidden.
 
-Measured v0.7.0 on an i7-8750H / GTX 1060, two 30-second runs per state. [Results and method](docs/BENCHMARKS.md).
+Same laptop, Balanced on battery; two 30-second open runs. Original RAM is from an earlier AC / Power Saver test. Response measures idle messages, not clicks. [Results and method](docs/BENCHMARKS.md).
 
 ## Laptops
 
@@ -38,4 +38,4 @@ The GK5CN6Z platform also appears in the [XMG NEO 15 (M18)](https://download.sch
 
 Keep the original app installed for now, with its startup disabled. OEM uninstall and full feature replacement have not been verified.
 
-[Build from source](docs/BUILD.md) · [Fan support](docs/FAN_SUPPORT.md) · [Report a problem](https://github.com/Tlamir/MinimalistControlCenter/issues) · [MIT license](LICENSE)
+[Build from source](docs/BUILD.md) Â· [Fan support](docs/FAN_SUPPORT.md) Â· [Report a problem](https://github.com/Tlamir/MinimalistControlCenter/issues) Â· [MIT license](LICENSE)

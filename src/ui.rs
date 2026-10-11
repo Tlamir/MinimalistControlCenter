@@ -10,7 +10,11 @@ use mcc::{
 use std::{
     cell::RefCell,
     ptr,
-    sync::mpsc::{self, Receiver, SyncSender},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+    },
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
@@ -99,6 +103,7 @@ enum Job {
     StartupConnect,
     Status,
     Poll,
+    StopObserver,
     ReconnectPoll,
     Preset(Preset),
     Fan(FanMode),
@@ -149,17 +154,22 @@ impl Completed {
     }
 }
 fn call(args: &[String]) -> Result<serde_json::Value, String> {
-    use std::os::windows::process::CommandExt;
-    let path = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .with_file_name("mcc.exe");
-    let mut cmd = std::process::Command::new(path);
-    cmd.args(args).creation_flags(0x08000000);
     let timeout = if args.first().is_some_and(|a| a == "startup") {
         15
     } else {
         5
     };
+    call_with_timeout(args, timeout)
+}
+fn call_with_timeout(args: &[String], timeout: u64) -> Result<serde_json::Value, String> {
+    use std::os::windows::process::CommandExt;
+    let path = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .with_file_name("mcc.exe");
+    let mut cmd = std::process::Command::new(path);
+    // DETACHED_PROCESS avoids allocating a hidden console host for each request.
+    // The runner supplies stdout/stderr pipes explicitly; job containment is unchanged.
+    cmd.args(args).creation_flags(0x00000008);
     let bytes = mcc::process::run(&mut cmd, Duration::from_secs(timeout))
         .map_err(|e| format!("Request stopped: {e:?}. Checking current settings…"))?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -171,6 +181,12 @@ fn call(args: &[String]) -> Result<serde_json::Value, String> {
 fn hardware_status() -> Result<mcc::hardware::HardwareStatus, String> {
     serde_json::from_value(call(&["hardware".into(), "status".into()])?["status"].clone())
         .map_err(|e| e.to_string())
+}
+fn boot_hardware_status() -> Result<mcc::hardware::HardwareStatus, String> {
+    serde_json::from_value(
+        call_with_timeout(&["hardware".into(), "status".into()], 20)?["status"].clone(),
+    )
+    .map_err(|e| e.to_string())
 }
 fn fan_args(f: FanMode) -> Vec<String> {
     vec![
@@ -186,18 +202,26 @@ fn fan_args(f: FanMode) -> Vec<String> {
 fn operation(job: &Job) -> Result<Completed, String> {
     let message = match job {
         Job::Connect | Job::StartupConnect => {
-            let s = hardware_status()?;
+            let startup = matches!(job, Job::StartupConnect);
+            let s = if startup {
+                boot_hardware_status()?
+            } else {
+                hardware_status()?
+            };
             if !s.writes_allowed
                 && s.ownership_reason
                     .as_deref()
                     .is_some_and(|r| r.starts_with("OEM service "))
             {
-                call(&["hardware".into(), "pause-oem".into()])?;
+                call_with_timeout(
+                    &["hardware".into(), "pause-oem".into()],
+                    if startup { 20 } else { 5 },
+                )?;
             }
-            if matches!(job, Job::StartupConnect) {
-                // Desired-state command rechecks ownership/capability and is idempotent.
-                // Do not retry a timed-out write or restore a fan/keyboard profile.
-                call(&["hardware".into(), "light-bar-off".into()])?;
+            if startup {
+                // Fresh desired-state command checks pending pulses and readback before writing.
+                // Boot recovery must never replay a toggle or apply a fan/keyboard profile.
+                call_with_timeout(&["hardware".into(), "light-bar-off".into()], 20)?;
                 "Connected · light bar off."
             } else {
                 "Connected."
@@ -205,24 +229,9 @@ fn operation(job: &Job) -> Result<Completed, String> {
         }
         Job::Status | Job::ReconnectPoll => "Settings refreshed.",
         Job::Poll => {
-            let mut r = Completed::message("Fan state synchronized.");
-            r.observation = Some(
-                serde_json::from_value(
-                    call(&["hardware".into(), "observe".into()])?["observation"].clone(),
-                )
-                .map_err(|e| e.to_string())?,
-            );
-            if let Some(o) = &r.observation {
-                if !o.writes_allowed {
-                    r.error = true;
-                    r.message = o
-                        .ownership_reason
-                        .clone()
-                        .unwrap_or("Original controller has control.".into());
-                }
-            }
-            return Ok(r);
+            return Err("Observation reader unavailable".into());
         }
+        Job::StopObserver => return Ok(Completed::message("")),
         Job::Startup(_) | Job::StartupStatus => {
             let action = match job {
                 Job::Startup(true) => "on",
@@ -354,8 +363,54 @@ fn operation(job: &Job) -> Result<Completed, String> {
     };
     Ok(Completed::message(message))
 }
-fn worker(job: Job) -> Completed {
-    let mut r = worker_with(job, operation, hardware_status);
+fn worker(job: Job, observer: &mut Option<mcc::observer::Observer>) -> Completed {
+    let startup = matches!(job, Job::StartupConnect);
+    let mut r = worker_with(
+        job,
+        |job| {
+            if matches!(job, Job::Poll) {
+                if observer.is_none() {
+                    let path = std::env::current_exe()
+                        .map_err(|e| e.to_string())?
+                        .with_file_name("mcc.exe");
+                    *observer = Some(
+                        mcc::observer::Observer::start(&path)
+                            .map_err(|e| format!("Observation reader stopped: {e:?}"))?,
+                    );
+                }
+                let result = observer
+                    .as_mut()
+                    .ok_or("Observation reader unavailable")?
+                    .read(Duration::from_secs(5));
+                let observation = match result {
+                    Ok(o) => o,
+                    Err(e) => {
+                        *observer = None;
+                        return Err(e);
+                    }
+                };
+                let mut r = Completed::message("Fan state synchronized.");
+                if !observation.writes_allowed {
+                    r.error = true;
+                    r.message = observation
+                        .ownership_reason
+                        .clone()
+                        .unwrap_or("Original controller has control.".into());
+                }
+                r.observation = Some(observation);
+                Ok(r)
+            } else {
+                operation(job)
+            }
+        },
+        || {
+            if startup {
+                boot_hardware_status()
+            } else {
+                hardware_status()
+            }
+        },
+    );
     r.power = mcc::desktop::active_power();
     r.power_refreshed = true;
     r
@@ -397,6 +452,15 @@ fn worker_with(
         match status() {
             Ok(s) => {
                 if matches!(job, Job::StartupConnect)
+                    && s.writes_allowed
+                    && s.capabilities.light_bar
+                    && !s.capabilities.light_bar_enabled
+                {
+                    // A timed-out request may have completed. Verified desired state ends recovery.
+                    r.error = false;
+                    r.message = "Connected · light bar off.".into();
+                }
+                if matches!(job, Job::StartupConnect)
                     && s.capabilities.light_bar_enabled
                     && !r.error
                 {
@@ -437,6 +501,7 @@ fn demo_caps() -> mcc::control::Capabilities {
 }
 fn demo_worker(job: Job, c: &mut mcc::control::Capabilities, fail: &mut bool) -> Completed {
     let mut r = Completed::message("Preview only · no hardware changes.");
+    r.startup_attempt = matches!(job, Job::StartupConnect);
     match job {
         Job::StartupConnect => c.light_bar_enabled = false,
         Job::Fan(f) => c.fan_mode_raw = f.byte(),
@@ -500,6 +565,7 @@ struct Benchmark {
     path: std::path::PathBuf,
     hidden: bool,
     self_test: bool,
+    startup_test: bool,
 }
 struct App {
     hwnd: HWND,
@@ -512,9 +578,12 @@ struct App {
     rx: Receiver<Completed>,
     session: Session,
     monitor: Monitor,
+    observation_scope: Arc<AtomicBool>,
     clock: Instant,
     visible: bool,
     startup: Option<mcc::startup::Status>,
+    startup_recovery: Option<mcc::startup::Recovery>,
+    startup_attempts: u8,
     message: String,
     error: bool,
     lighting: Lighting,
@@ -867,6 +936,15 @@ impl App {
         if self.session.busy {
             return;
         }
+        if !matches!(job, Job::StartupConnect | Job::StartupStatus)
+            && self.startup_recovery.is_some()
+        {
+            self.startup_recovery = None;
+            // SAFETY: An explicit user action supersedes pending boot recovery.
+            unsafe {
+                KillTimer(self.hwnd, 3);
+            }
+        }
         let startup_check = matches!(job, Job::StartupStatus);
         let gpu_sample = matches!(job, Job::Gpu);
         if self.tx.try_send(job).is_ok() {
@@ -885,9 +963,10 @@ impl App {
         }
     }
     fn poll(&mut self) {
-        if !self.visible {
+        if !self.visible || self.page != Page::Cooling {
             return;
         }
+        self.sync_observer_scope();
         if self
             .monitor
             .due(self.clock.elapsed().as_millis() as u64, self.session.busy)
@@ -915,13 +994,41 @@ impl App {
             if let Some(gpu) = r.gpu.filter(|_| self.visible) {
                 self.gpu = Some((gpu, Instant::now()));
             }
-            if r.startup_attempt && r.error && self.tray.cbSize != 0 {
+            let mut startup_exhausted = false;
+            if r.startup_attempt {
+                self.startup_attempts = self.startup_attempts.saturating_add(1);
+                if let Some(recovery) = self.startup_recovery.as_mut() {
+                    match recovery.completed(
+                        self.clock.elapsed().as_millis() as u64,
+                        !r.error && !r.status_failed,
+                    ) {
+                        mcc::startup::RecoveryOutcome::RetryAfter(delay) => {
+                            // SAFETY: A sparse boot-only timer works while hidden; no dashboard sampling.
+                            unsafe {
+                                SetTimer(self.hwnd, 3, delay, None);
+                            }
+                        }
+                        outcome => {
+                            startup_exhausted =
+                                matches!(outcome, mcc::startup::RecoveryOutcome::Exhausted);
+                            self.startup_recovery = None;
+                            // SAFETY: Cancel the boot-only timer on this live UI window.
+                            unsafe {
+                                KillTimer(self.hwnd, 3);
+                            }
+                        }
+                    }
+                }
+            }
+            if startup_exhausted && self.tray.cbSize != 0 {
                 let mut tray = self.tray;
                 tray.uFlags = NIF_INFO;
                 tray.dwInfoFlags = NIIF_WARNING;
                 let title = wide("Minimalist needs attention");
                 tray.szInfoTitle[..title.len()].copy_from_slice(&title);
-                let detail = wide(&r.message.chars().take(120).collect::<String>());
+                let detail = wide(
+                    "Couldn't connect after startup. Open Minimalist and choose Enable controls.",
+                );
                 tray.szInfo[..detail.len()].copy_from_slice(&detail);
                 // SAFETY: Bounded UTF16 strings, initialized tray ID and callback window.
                 unsafe {
@@ -930,24 +1037,14 @@ impl App {
             }
             if r.stop_monitor {
                 self.monitor.enabled = false;
-                // SAFETY: Cancel only our read-only observation timer.
-                unsafe {
-                    KillTimer(self.hwnd, 3);
-                }
             } else if r.status.is_some()
                 && !self.monitor.enabled
                 && !self.demo
                 && self.benchmark.is_none()
             {
                 self.monitor.enabled = true;
-                // SAFETY: UI-owned timer; activated only after explicit hardware connection.
-                unsafe {
-                    if self.visible {
-                        SetTimer(self.hwnd, 3, 1000, None);
-                    }
-                }
             }
-            if r.passive && !r.startup_refreshed {
+            if (r.passive && !r.startup_refreshed) || r.status.is_some() {
                 self.monitor.completed(
                     self.clock.elapsed().as_millis() as u64,
                     self.visible,
@@ -1012,8 +1109,12 @@ impl App {
                 self.refresh_controls();
             }
         }
+        self.sync_observer_scope();
     }
     fn dashboard(&mut self) {
+        if !self.visible {
+            return;
+        }
         let begin = Instant::now();
         if self
             .gpu
@@ -1024,7 +1125,7 @@ impl App {
             self.refresh_controls();
         }
         let s = mcc::platform::dashboard_snapshot();
-        self.stats[0] = s
+        let cpu = s
             .system_cpu_times
             .value
             .and_then(|now| {
@@ -1034,12 +1135,12 @@ impl App {
             })
             .map(|v| format!("{v:.0}%"))
             .unwrap_or("—".into());
-        self.stats[1] = s
+        let memory = s
             .memory_used_percent
             .value
             .map(|v| format!("{v}%"))
             .unwrap_or("—".into());
-        self.stats[2] = s
+        let battery = s
             .battery_percent
             .value
             .map(|v| {
@@ -1053,15 +1154,20 @@ impl App {
                 )
             })
             .unwrap_or("—".into());
-        self.cpu_clock = s
+        let clock = s
             .cpu_clock_mhz
             .value
             .map(|v| format!("{:.2} GHz · OS", v as f64 / 1000.))
             .unwrap_or("—".into());
-        let r = self.rect(32, 555, 656, 96);
-        // SAFETY: Stack RECT copied by Windows; no background erase.
-        unsafe {
-            InvalidateRect(self.hwnd, &r, 0);
+        let stats = [cpu, memory, battery];
+        if self.stats != stats || self.cpu_clock != clock {
+            self.stats = stats;
+            self.cpu_clock = clock;
+            let r = self.rect(32, 555, 656, 96);
+            // SAFETY: Stack RECT copied by Windows; repaint only changed displayed values.
+            unsafe {
+                InvalidateRect(self.hwnd, &r, 0);
+            }
         }
         self.dashboard_us += begin.elapsed().as_micros() as u64;
     }
@@ -1137,7 +1243,12 @@ impl App {
                     SETTINGS => Page::Settings,
                     _ => Page::Cooling,
                 };
+                self.sync_observer_scope();
                 self.refresh_controls();
+                if id == COOLING && !self.demo && self.benchmark.is_none() {
+                    self.monitor.wake();
+                    self.poll();
+                }
                 if id == SETTINGS && !self.demo && self.benchmark.is_none() && !self.session.busy {
                     self.submit(Job::StartupStatus);
                 }
@@ -1398,28 +1509,55 @@ impl App {
             _ => {}
         }
     }
+    fn sync_observer_scope(&self) {
+        let enabled = self.visible
+            && self.page == Page::Cooling
+            && self.monitor.enabled
+            && self.session.allowed;
+        if self.observation_scope.swap(enabled, Ordering::Relaxed) && !enabled {
+            let _ = self.tx.try_send(Job::StopObserver);
+        }
+    }
+    fn observation_visibility(&mut self, visible: bool) {
+        if self.visible == visible {
+            return;
+        }
+        self.visible = visible;
+        self.sync_observer_scope();
+        self.previous_cpu = None;
+        if visible {
+            self.monitor.wake();
+            // SAFETY: One shared observation timer on the live UI window.
+            unsafe {
+                SetTimer(self.hwnd, 1, 1000, None);
+            }
+            self.dashboard();
+        } else {
+            self.gpu = None;
+            caption(self.handle(GPU_TEMP), "Read GPU");
+            // SAFETY: Suspend OS and firmware observations in tray and when minimized.
+            unsafe {
+                KillTimer(self.hwnd, 1);
+            }
+        }
+    }
     fn hide(&mut self) {
-        self.visible = false;
-        self.gpu = None;
-        caption(self.handle(GPU_TEMP), "Read GPU");
+        self.observation_visibility(false);
         // SAFETY: UI-owned HWND and timer; hidden dashboard polling stops.
         unsafe {
             ShowWindow(self.hwnd, SW_HIDE);
             KillTimer(self.hwnd, 1);
-            KillTimer(self.hwnd, 3);
         }
     }
     fn show(&mut self) {
         self.visible = true;
+        self.sync_observer_scope();
         self.monitor.wake();
         // SAFETY: Live HWND, documented restore and one-second OS-only timer.
         unsafe {
             ShowWindow(self.hwnd, SW_RESTORE);
             SetForegroundWindow(self.hwnd);
             SetTimer(self.hwnd, 1, 1000, None);
-            if self.monitor.enabled {
-                SetTimer(self.hwnd, 3, 1000, None);
-            }
         }
         self.previous_cpu = None;
         if !self.demo {
@@ -1833,9 +1971,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             return true;
         }
         match msg {
-            WM_SHOWWINDOW if w != 0 => { a.visible=true; a.monitor.wake();
-                // SAFETY: UI-owned dashboard timer when another instance restores this window.
-                unsafe { SetTimer(hwnd, 1, 1000, None); if a.monitor.enabled { SetTimer(hwnd, 3, 1000, None); } } true }
+            WM_SHOWWINDOW => { a.observation_visibility(w != 0); true }
             WM_ERASEBKGND=>true,
             WM_PAINT=>{
                 a.paints += 1;
@@ -1851,19 +1987,31 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             WM_KEYDOWN if w==0x74=>{if a.session.capabilities.is_some(){a.submit(Job::Status);}true}
             UPDATE=>{a.update();true}
             WM_POWERBROADCAST if w == 18 || w == 7 => { a.monitor.wake(); a.poll(); true }
-            WM_TIMER if w==3=>{a.poll();true}
             WM_TIMER=>{
                 a.ticks+=1;if a.session.busy{a.busy_ticks+=1;}
-                if w==2 {
+                if w==3 {
+                    if a.startup_recovery.as_mut().is_some_and(|r| r.due(a.clock.elapsed().as_millis() as u64, a.session.busy)) {
+                        // SAFETY: Cancel our boot timer before queueing one bounded retry.
+                        unsafe { KillTimer(hwnd, 3); }
+                        a.submit(Job::StartupConnect);
+                    } else if a.startup_recovery.is_some() {
+                        // SAFETY: Defer while a UI action is busy; no overlapping startup request.
+                        unsafe { SetTimer(hwnd, 3, 1000, None); }
+                    } else {
+                        // SAFETY: Recovery ended; remove our timer from the live UI window.
+                        unsafe { KillTimer(hwnd, 3); }
+                    }
+                } else if w==2 {
                     if let Some(b)=&a.benchmark{if b.start.elapsed()>=Duration::from_secs(b.seconds){
                         let after=mcc::platform::metrics().value;
-                        let passed=!b.self_test || (a.test_completed && a.busy_ticks>=3 && a.pages_checked && a.buttons.iter().all(|b|!b.hwnd.is_null()));
-                        let report=serde_json::json!({"ok":passed,"benchmark":"native_ui_os_counters_only","hidden":b.hidden,"wall_ms":b.start.elapsed().as_secs_f64()*1000.,"cpu_ms":after.map(|a|a.cpu_time_100ns.saturating_sub(b.before.cpu_time_100ns)as f64/10000.),"working_set_bytes":after.map(|a|a.working_set_bytes),"peak_working_set_bytes":after.map(|a|a.peak_working_set_bytes),"private_commit_bytes":after.map(|a|a.private_commit_bytes),"message_ticks":a.ticks,"ticks_during_worker_delay":a.busy_ticks,"worker_responsive":a.test_completed,"hardware_accessed":false,"pages":3,"font_faces":a.font_faces(),"paints":a.paints,"button_paints":a.button_paints,"paint_us":a.paint_us,"dashboard_us":a.dashboard_us,"pages_isolated_and_startup_writes_disabled":a.pages_checked,"note":"Includes startup. Windows CPU counters are quantized. No game FPS, thermal or OEM comparison."});
+                        let startup_passed=!b.startup_test || (a.startup_attempts==2 && !a.visible && a.startup_recovery.is_none() && a.session.allowed && a.session.capabilities.as_ref().is_some_and(|c| !c.light_bar_enabled && c.fan_mode_raw==64));
+                        let passed=startup_passed && (!b.self_test || (a.test_completed && a.busy_ticks>=3 && a.pages_checked && a.buttons.iter().all(|b|!b.hwnd.is_null())));
+                        let report=serde_json::json!({"ok":passed,"benchmark":"native_ui_os_counters_only","hidden":b.hidden,"startup_recovery_test":b.startup_test,"startup_attempts":a.startup_attempts,"wall_ms":b.start.elapsed().as_secs_f64()*1000.,"cpu_ms":after.map(|a|a.cpu_time_100ns.saturating_sub(b.before.cpu_time_100ns)as f64/10000.),"working_set_bytes":after.map(|a|a.working_set_bytes),"peak_working_set_bytes":after.map(|a|a.peak_working_set_bytes),"private_commit_bytes":after.map(|a|a.private_commit_bytes),"message_ticks":a.ticks,"ticks_during_worker_delay":a.busy_ticks,"worker_responsive":a.test_completed,"hardware_accessed":false,"pages":3,"font_faces":a.font_faces(),"paints":a.paints,"button_paints":a.button_paints,"paint_us":a.paint_us,"dashboard_us":a.dashboard_us,"pages_isolated_and_startup_writes_disabled":a.pages_checked,"note":"Includes startup. Windows CPU counters are quantized. No game FPS, thermal or OEM comparison."});
                         let _=std::fs::write(&b.path,serde_json::to_vec_pretty(&report).unwrap());
                         // SAFETY: Exit this UI after its bounded test/benchmark.
                         unsafe{PostMessageW(hwnd,WM_CLOSE,1,0);}
                     }}
-                }else{a.update();a.dashboard();}true
+                }else{a.dashboard();a.poll();}true
             }
             TRAY if l as u32==WM_LBUTTONUP || l as u32==WM_LBUTTONDBLCLK=>{a.show();true}
             TRAY if l as u32==WM_RBUTTONUP=>{
@@ -1934,7 +2082,9 @@ pub fn run() {
         [flag, path] if flag == "--render-preview" => Some(std::path::PathBuf::from(path)),
         _ => None,
     };
-    let demo = args == ["--demo"] || args == ["--demo-failure"] || preview.is_some();
+    let startup_test = matches!(args.as_slice(), [flag, _] if flag == "--self-test-startup");
+    let demo =
+        args == ["--demo"] || args == ["--demo-failure"] || preview.is_some() || startup_test;
     let mode = match args.as_slice() {
         [] => None,
         [a] if a == "--connect"
@@ -1946,6 +2096,9 @@ pub fn run() {
             None
         }
         [a, path] if a == "--self-test" => Some((2, std::path::PathBuf::from(path), true, true)),
+        [a, path] if a == "--self-test-startup" => {
+            Some((15, std::path::PathBuf::from(path), true, false))
+        }
         [a, _] if a == "--render-preview" => None,
         [a, seconds, path] if a == "--benchmark" || a == "--benchmark-hidden" => {
             match seconds.parse::<u64>() {
@@ -2082,19 +2235,46 @@ pub fn run() {
         );
         (dpi, fonts)
     };
-    let (tx, jobs) = mpsc::sync_channel(1);
+    // One active request plus an observer shutdown notification.
+    let (tx, jobs) = mpsc::sync_channel(2);
     let (result_tx, rx) = mpsc::channel();
     let window_id = hwnd as usize;
-    let fail_demo = args == ["--demo-failure"];
+    let fail_demo = args == ["--demo-failure"] || startup_test;
+    let observation_scope = Arc::new(AtomicBool::new(false));
+    let worker_scope = observation_scope.clone();
     std::thread::spawn(move || {
         let mut caps = demo_caps();
+        if startup_test {
+            caps.fan_mode_raw = 64;
+        }
         let mut fail = fail_demo;
+        let mut observer = None;
         while let Ok(job) = jobs.recv() {
-            let r = if demo {
+            if !worker_scope.load(Ordering::Relaxed) || matches!(job, Job::StopObserver) {
+                observer = None;
+            }
+            if matches!(job, Job::StopObserver) {
+                continue;
+            }
+            let r = if startup_test && matches!(job, Job::StartupConnect) && fail {
+                fail = false;
+                let mut r = Completed::message("Synthetic boot connection timed out.");
+                r.error = true;
+                r.status_failed = true;
+                r.startup_attempt = true;
+                r
+            } else if demo {
                 demo_worker(job, &mut caps, &mut fail)
             } else {
-                worker(job)
+                worker(job, &mut observer)
             };
+            if !worker_scope.load(Ordering::Relaxed)
+                || r.stop_monitor
+                || r.status_failed
+                || r.observation.as_ref().is_some_and(|o| !o.writes_allowed)
+            {
+                observer = None;
+            }
             if result_tx.send(r).is_err() {
                 break;
             }
@@ -2122,6 +2302,9 @@ pub fn run() {
         .find(|p| p.name == "Balanced")
         .map(|p| p.lighting.clone())
         .unwrap_or_default();
+    let initially_visible = args != ["--tray"]
+        && args != ["--startup-controls"]
+        && !mode.as_ref().is_some_and(|(_, _, hidden, _)| *hidden);
     let mut a = App {
         hwnd,
         // SAFETY: Fixed registered Windows notification name copied by Windows.
@@ -2134,9 +2317,12 @@ pub fn run() {
         rx,
         session: Session::default(),
         monitor: Monitor::default(),
+        observation_scope,
         clock: Instant::now(),
-        visible: true,
+        visible: initially_visible,
         startup: None,
+        startup_recovery: (args == ["--startup-controls"] || startup_test).then(mcc::startup::Recovery::default),
+        startup_attempts: 0,
         message: settings_error.as_ref().map(|e| format!("Preferences could not be loaded: {e}. Defaults shown; hardware was not changed."))
             .unwrap_or("Enable controls to connect.".into()),
         error: settings_error.is_some(),
@@ -2160,6 +2346,7 @@ pub fn run() {
                 path,
                 hidden,
                 self_test,
+                startup_test,
                 before,
             })
         }),
@@ -2277,8 +2464,8 @@ pub fn run() {
     unsafe {
         Shell_NotifyIconW(NIM_ADD, &a.tray);
     }
-    if args == ["--connect"] || args == ["--startup-controls"] {
-        a.submit(if args == ["--startup-controls"] {
+    if args == ["--connect"] || args == ["--startup-controls"] || startup_test {
+        a.submit(if args == ["--startup-controls"] || startup_test {
             Job::StartupConnect
         } else {
             Job::Connect
@@ -2417,6 +2604,36 @@ mod tests {
         );
         assert!(r.error);
         assert!(r.message.contains("still reports on"));
+    }
+    #[test]
+    fn late_boot_acknowledgement_finishes_once_fresh_status_confirms_bar_off() {
+        let attempts = std::cell::Cell::new(0);
+        let r = worker_with(
+            Job::StartupConnect,
+            |_| {
+                attempts.set(attempts.get() + 1);
+                Err("late acknowledgement".into())
+            },
+            || {
+                let mut s = ready();
+                s.capabilities.light_bar_enabled = false;
+                Ok(s)
+            },
+        );
+        assert_eq!(attempts.get(), 1);
+        assert!(!r.error && !r.status_failed);
+        assert!(r.message.contains("light bar off"));
+        let r = worker_with(
+            Job::StartupConnect,
+            |_| Err("timed out".into()),
+            || {
+                let mut s = ready();
+                s.capabilities.light_bar_enabled = false;
+                s.writes_allowed = false;
+                Ok(s)
+            },
+        );
+        assert!(r.error);
     }
     #[test]
     fn installed_logon_switch_preserves_physical_fan_mode_and_never_applies_keyboard_or_power() {
