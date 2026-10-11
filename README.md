@@ -30,6 +30,8 @@ Office uses automatic cooling with Power Saver. Custom fan curves and the OEM mi
 
 Uses **25.4 MiB open / 14.1 MiB in the tray**, including its helper. The original app measured **175.8 MiB open / 171.8 MiB minimized**. Background polling stops when hidden.
 
+Both averaged **less than 0.1% CPU open**. Hidden CPU measured **0% observed** for Minimalist and **0.004%** for the original; zero means below measurement resolution.
+
 Same laptop, different power settings and pages. These measurements show memory use, CPU activity and idle window replies; they do not establish faster controls or longer battery life. [Results and method](docs/BENCHMARKS.md).
 
 ## Laptops

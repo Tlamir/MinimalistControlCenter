@@ -11,6 +11,8 @@
 
 Minimalist used less RAM in these sessions. The original app's idle default page used less CPU than Minimalist's connected Cooling page. Different pages and power settings mean this is not a controlled comparison of speed or energy use. Battery life was not measured.
 
+The CPU chart uses the full 0-100% scale, with exact labels: both open averages were below 0.1%. Minimized/tray rows show background idle usage. Minimalist's observed zero is below counter resolution, not a guarantee of no CPU activity.
+
 ## Method
 
 Same Monster Tulpar T5 V17.1 / N.1.06, i7-8750H, GTX 1060, 16 GB RAM, 12 logical processors; Windows 25H2 build 26200.9457. One app ran at a time with normal desktop activity and no build or stress test.
