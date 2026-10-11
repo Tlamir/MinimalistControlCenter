@@ -64,8 +64,8 @@ def main():
     fig.text(.035, .20, 'Original: AC / Power Saver, default page. Minimalist 0.8.0: battery / Balanced, connected Cooling page.', fontsize=9, color='#52616b')
     fig.text(.035, .14, 'Both apps averaged less than 0.1% CPU open. * Zero means below counter resolution during the 30s tray test.', fontsize=9, color='#52616b')
     fig.text(.035, .08, 'Includes app helpers. Conditions differ; battery savings unmeasured. Idle replies are window messages, not clicks.', fontsize=9, color='#52616b')
-    fig.savefig(ROOT / 'assets/benchmarks.svg', metadata={'Creator': 'scripts/plot_benchmarks.py', 'Date': DATA['date_utc']})
-    svg = ROOT / 'assets/benchmarks.svg'
+    fig.savefig(ROOT / 'assets/benchmarks-idle-2026-10-11.svg', metadata={'Creator': 'scripts/plot_benchmarks.py', 'Date': DATA['date_utc']})
+    svg = ROOT / 'assets/benchmarks-idle-2026-10-11.svg'
     svg.write_text('\n'.join(line.rstrip() for line in svg.read_text(encoding='utf-8').splitlines()) + '\n', encoding='utf-8')
     fig.savefig(ROOT / 'assets/benchmarks.png', dpi=160, metadata={'Software': 'scripts/plot_benchmarks.py'})
     plt.close(fig)

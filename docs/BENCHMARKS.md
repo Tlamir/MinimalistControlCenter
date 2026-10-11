@@ -1,6 +1,6 @@
 # Benchmarks
 
-![Original control center vs. Minimalist: RAM, CPU and idle window reply](../assets/benchmarks.svg)
+![Original control center vs. Minimalist: RAM, CPU and idle window reply](../assets/benchmarks-idle-2026-10-11.svg)
 
 | App / state | RAM, resident | CPU, whole PC | Idle reply, p95 |
 |---|---:|---:|---:|

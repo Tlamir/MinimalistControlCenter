@@ -41,7 +41,7 @@ def main():
         'SAFETY.md': root / 'docs/SAFETY.md',
         'PROTOCOL.md': root / 'docs/PROTOCOL.md',
         'BUILD.md': root / 'docs/BUILD.md',
-        'benchmarks.svg': root / 'assets/benchmarks.svg',
+        'benchmarks.svg': root / 'assets/benchmarks-idle-2026-10-11.svg',
         'LICENSE': root / 'LICENSE',
         'THIRD_PARTY_NOTICES.md': root / 'THIRD_PARTY_NOTICES.md',
         'RUST-RUNTIME-NOTICES.html': args.runtime_notices,
@@ -62,11 +62,11 @@ def main():
     # Installed documentation is flat, with all linked documents present alongside the README.
     readme = folder / 'README.md'
     readme.write_text(readme.read_text(encoding='utf-8').replace('](docs/', '](')
-                      .replace('](assets/benchmarks.svg)', '](benchmarks.svg)'), encoding='utf-8')
+                      .replace('](assets/benchmarks-idle-2026-10-11.svg)', '](benchmarks.svg)'), encoding='utf-8')
     bench = folder / 'BENCHMARKS.md'
     repo_url = 'https://github.com/Tlamir/MinimalistControlCenter/blob/main/'
     bench.write_text(benchmark_text.replace(report_link.group(1), 'BENCHMARKS.json')
-                     .replace('../assets/benchmarks.svg', 'benchmarks.svg')
+                     .replace('../assets/benchmarks-idle-2026-10-11.svg', 'benchmarks.svg')
                      .replace('../assets/', 'https://raw.githubusercontent.com/Tlamir/MinimalistControlCenter/main/assets/')
                      .replace('../reports/', repo_url + 'reports/')
                      .replace('../scripts/', repo_url + 'scripts/'), encoding='utf-8')
