@@ -60,7 +60,7 @@ Build target remains target/v041; Cargo package v0.5.0. 100 release tests, stric
 
 # Verified v0.4.2 delivery — 10 October 2026
 
-Latest owner request: documentation only; do not implement or run hardware tests in this turn. See [Missing features and known issues](docs/MISSING_FEATURES.md). New reported defect: lighting changes only one side of the keyboard; cause and affected zones/effects are not established.
+Latest owner request: documentation only; do not implement or run hardware tests in this turn. See [Missing features and known issues](MISSING_FEATURES.md). New reported defect: lighting changes only one side of the keyboard; cause and affected zones/effects are not established.
 
 Installed: C:/Users/yigit/Applications/MinimalistControlCenter/0.4.2. Owner explicitly confirmed Enable controls succeeds and physical turbo changes synchronize with UI. 95 release tests, strict Clippy/fmt, both PE audits, Windows+Ubuntu CI for code commit4a035df pass. Source includes physical path resolution for runas/startup and installer outside redirected AppData.
 

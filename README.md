@@ -10,13 +10,21 @@ I built this because the original control center felt sluggish, used too much RA
 
 ## Install
 
+Keep the original control center installed for recovery, with its startup disabled. OEM uninstall and full feature replacement have not been verified. Hardware controls currently require the tested Monster Tulpar T5 V17.1 with BIOS N.1.06; other models stay read-only.
+
 1. Exit the original control center and any older Minimalist app, including their tray icons.
 2. Download the ZIP above, right-click it and choose **Extract All**, then open the extracted folder.
 3. Double-click **Install.cmd**, accept the administrator prompt, and open the desktop shortcut.
 
 Starts in the tray with Windows and turns the light bar off after sign-in. No repeated administrator prompts. Close hides the window; **Exit** quits. Remove it through Windows **Settings > Apps > Installed apps**.
 
+Current published builds are unsigned prereleases and can trigger Windows unknown-publisher warnings or be blocked by security policy. SHA256 checks verify file integrity, not publisher identity. Trusted signing requires a publisher certificate; see [release signing](docs/BUILD.md#release-signing). A Defender threat detection needs separate investigation using the detection name and affected file in **Windows Security > Protection history**.
+
 ## Controls
+
+![Cooling page preview with simulated readings](assets/ui-cooling.png)
+
+*Native UI preview from v0.7.0; readings are simulated.*
 
 - **Cooling:** Automatic / Boost fans; Office, Balanced and Performance power presets; save your own combination.
 - **Lighting:** keyboard effects, brightness and color; light-bar switch.
@@ -38,6 +46,6 @@ Same laptop, different power settings and pages. These measurements show memory 
 
 The GK5CN6Z platform also appears in the [XMG NEO 15 (M18)](https://download.schenker-tech.de/package/xmg_neo15xne15m18/). **Hardware controls currently support the tested Monster Tulpar T5 V17.1, BIOS N.1.06.** Other Tongfang/XMG firmware variants need validation; unrecognized hardware stays read-only.
 
-Keep the original app installed for now, with its startup disabled. OEM uninstall and full feature replacement have not been verified.
+To help validate another model, run `mcc.exe diagnostics > diagnostics.json` without administrator access, review the file, and attach it to a [laptop support request](https://github.com/Tlamir/MinimalistControlCenter/issues/new?template=hardware_support.yml). EC firmware is reported as unknown until a verified query exists. Older releases can use `mcc.exe status --json`.
 
-[Build from source](docs/BUILD.md) | [Fan support](docs/FAN_SUPPORT.md) | [Report a problem](https://github.com/Tlamir/MinimalistControlCenter/issues) | [MIT license](LICENSE)
+[Build from source](docs/BUILD.md) | [Fan support](docs/FAN_SUPPORT.md) | [Contributing](https://github.com/Tlamir/MinimalistControlCenter/blob/main/CONTRIBUTING.md) | [Report a problem](https://github.com/Tlamir/MinimalistControlCenter/issues) | [MIT license](LICENSE)

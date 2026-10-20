@@ -38,6 +38,8 @@ No software guarantees a PC can never fail. Evidence covers one short physical c
 
 Automatic and boost are firmware modes. There is no periodic forced speed or host temperature loop. Exit/crash leaves the requested firmware mode; it does not reset hardware. The owner reports the physical turbo button changes real cooling with the original app paused. v0.4 observes firmware mode periodically rather than continuously overriding it. Refresh failure clears state; bounded retries remain reads only. End-to-end physical display synchronization, sleep/resume and cold boot still need owner validation.
 
+If Windows Security terminates or quarantines MCC while Boost is selected, the application cannot run cleanup or promise a return to Auto. The last accepted firmware mode remains requested. Use the OEM controls or the verified physical turbo control to change modes, and investigate the detection before resuming MCC. An in-process thermal watchdog or exit handler cannot cover forced termination or an OS failure. That is why fixed low speeds and software curves remain unavailable; adding background polling would not establish an autonomous cooling fail-safe.
+
 The offline simulator is disconnected. Its illustrative temperatures and unitless demand are not approved settings.
 
 ## Actual evidence

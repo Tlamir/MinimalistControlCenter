@@ -1,0 +1,26 @@
+name: Laptop support request
+description: Collect read-only evidence for a model or BIOS variant.
+body:
+  - type: input
+    id: model
+    attributes:
+      label: Manufacturer, laptop model and BIOS version
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Reviewed diagnostic report
+      description: Run mcc.exe diagnostics without administrator access and paste the reviewed JSON. Older releases can use mcc.exe status --json. No EC probe or hardware writes are needed.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: oem
+    attributes:
+      label: Original control center name and version
+  - type: textarea
+    id: features
+    attributes:
+      label: Features and observations
+      description: Describe OEM fan modes and lighting features. A report does not authorize new writes. Keep the original controller installed; do not run raw EC tools or overheating tests.

@@ -11,15 +11,34 @@ import tomllib
 import zipfile
 
 
+def verify_signatures(root, paths):
+    """Check trust before executing any release input or creating an archive."""
+    if sys.platform != 'win32':
+        raise ValueError('Signed release packaging requires Windows Authenticode verification')
+    subprocess.run(['powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive',
+                    '-ExecutionPolicy', 'Bypass',
+                    '-File', str(root / 'scripts/verify-signatures.ps1'),
+                    *[str(path.resolve()) for path in paths]], check=True, timeout=120)
+
+
 def main():
     root = pathlib.Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bin-dir', type=pathlib.Path, default=root / 'target/release')
     parser.add_argument('--runtime-notices', type=pathlib.Path, required=True)
     parser.add_argument('--output', type=pathlib.Path, default=root / 'target/packages')
+    parser.add_argument('--script-dir', type=pathlib.Path, default=root / 'scripts',
+                        help='Directory containing signed Install.ps1 and Uninstall.ps1')
+    parser.add_argument('--allow-unsigned', action='store_true',
+                        help='Explicitly allow an unsigned development/CI package; not a trusted release')
     args = parser.parse_args()
     version = tomllib.loads((root / 'Cargo.toml').read_text(encoding='utf-8'))['package']['version']
     binary = args.bin_dir / 'mcc.exe'
+    if args.allow_unsigned:
+        print('WARNING: unsigned development package; Windows may block these files.', file=sys.stderr)
+    else:
+        verify_signatures(root, [binary, args.bin_dir / 'mcc-ui.exe',
+                                args.script_dir / 'Install.ps1', args.script_dir / 'Uninstall.ps1'])
     result = subprocess.run([str(binary.resolve()), '--version'], check=True, capture_output=True, text=True, timeout=10)
     if result.stdout.strip() != f'mcc {version}':
         raise ValueError('Release binary version does not match Cargo.toml')
@@ -35,6 +54,7 @@ def main():
         'mcc-ui.exe': args.bin_dir / 'mcc-ui.exe',
         'README.md': root / 'README.md',
         'icon.svg': root / 'icon.svg',
+        'app.ico': root / 'assets/app.ico',
         'BENCHMARKS.md': root / 'docs/BENCHMARKS.md',
         'FAN_SUPPORT.md': root / 'docs/FAN_SUPPORT.md',
         'OWNER_CHECKS.md': root / 'docs/OWNER_CHECKS.md',
@@ -45,9 +65,9 @@ def main():
         'LICENSE': root / 'LICENSE',
         'THIRD_PARTY_NOTICES.md': root / 'THIRD_PARTY_NOTICES.md',
         'RUST-RUNTIME-NOTICES.html': args.runtime_notices,
-        'Install.ps1': root / 'scripts/install.ps1',
+        'Install.ps1': args.script_dir / 'Install.ps1',
         'Install.cmd': root / 'scripts/Install.cmd',
-        'Uninstall.ps1': root / 'scripts/uninstall.ps1',
+        'Uninstall.ps1': args.script_dir / 'Uninstall.ps1',
     }
     benchmark_text = files['BENCHMARKS.md'].read_text(encoding='utf-8')
     report_link = re.search(r'\[JSON report\]\((\.\./reports/benchmarks/[\w.-]+\.json)\)', benchmark_text)
@@ -59,9 +79,13 @@ def main():
     files['BENCHMARKS.json'] = report_path
     for name, source in files.items():
         shutil.copyfile(source, folder / name)
+    if not args.allow_unsigned:
+        verify_signatures(root, [folder / name for name in
+                                ['mcc.exe', 'mcc-ui.exe', 'Install.ps1', 'Uninstall.ps1']])
     # Installed documentation is flat, with all linked documents present alongside the README.
     readme = folder / 'README.md'
     readme.write_text(readme.read_text(encoding='utf-8').replace('](docs/', '](')
+                      .replace('](assets/ui-cooling.png)', '](https://raw.githubusercontent.com/Tlamir/MinimalistControlCenter/main/assets/ui-cooling.png)')
                       .replace('](assets/benchmarks-idle-cpu-1pct.svg)', '](benchmarks.svg)'), encoding='utf-8')
     bench = folder / 'BENCHMARKS.md'
     repo_url = 'https://github.com/Tlamir/MinimalistControlCenter/blob/main/'
@@ -71,7 +95,7 @@ def main():
                      .replace('../reports/', repo_url + 'reports/')
                      .replace('../scripts/', repo_url + 'scripts/'), encoding='utf-8')
     (folder / 'VERSION').write_text(version + '\n', encoding='ascii')
-    installed = ['mcc.exe', 'mcc-ui.exe', 'README.md', 'icon.svg', 'BENCHMARKS.md', 'FAN_SUPPORT.md',
+    installed = ['mcc.exe', 'mcc-ui.exe', 'README.md', 'icon.svg', 'app.ico', 'BENCHMARKS.md', 'FAN_SUPPORT.md',
                  'OWNER_CHECKS.md', 'SAFETY.md', 'PROTOCOL.md', 'BUILD.md', 'benchmarks.svg', 'BENCHMARKS.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
                  'RUST-RUNTIME-NOTICES.html', 'Uninstall.ps1', 'VERSION']
     hashes = {name: hashlib.sha256((folder / name).read_bytes()).hexdigest() for name in installed}

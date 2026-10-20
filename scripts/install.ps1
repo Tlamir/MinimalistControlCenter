@@ -47,7 +47,7 @@ try {
     # Inspect all inputs before altering startup or shortcuts.
     $version = (Get-Content -LiteralPath (Join-Path $Source 'VERSION') -Raw).Trim()
     if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid release version' }
-    $files = @('mcc.exe','mcc-ui.exe','README.md','icon.svg','BENCHMARKS.md','FAN_SUPPORT.md','OWNER_CHECKS.md','SAFETY.md','PROTOCOL.md','BUILD.md','benchmarks.svg','BENCHMARKS.json','LICENSE','THIRD_PARTY_NOTICES.md','RUST-RUNTIME-NOTICES.html','Uninstall.ps1','VERSION')
+    $files = @('mcc.exe','mcc-ui.exe','README.md','icon.svg','app.ico','BENCHMARKS.md','FAN_SUPPORT.md','OWNER_CHECKS.md','SAFETY.md','PROTOCOL.md','BUILD.md','benchmarks.svg','BENCHMARKS.json','LICENSE','THIRD_PARTY_NOTICES.md','RUST-RUNTIME-NOTICES.html','Uninstall.ps1','VERSION')
     $manifest = Get-Content -LiteralPath (Join-Path $Source 'manifest.json') -Raw | ConvertFrom-Json
     foreach ($name in $files) {
         $file = Join-Path $Source $name
@@ -230,7 +230,7 @@ try {
     $shortcut.WorkingDirectory = $destination
     $shortcut.Arguments = '--open-installed'
     $shortcut.Description = 'Minimalist Control Center'
-    $shortcut.IconLocation = $executable + ',0'
+    $shortcut.IconLocation = (Join-Path $destination 'app.ico') + ',0'
     $shortcut.Save()
     $shortcutChanged = $true
     $installStage = 'register uninstall'

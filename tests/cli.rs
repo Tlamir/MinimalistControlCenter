@@ -39,6 +39,36 @@ fn actual_binary_reports_read_only_and_unknown_temperatures() {
 }
 
 #[test]
+fn diagnostics_are_shareable_read_only_and_reject_extra_actions() {
+    let output = binary().args(["diagnostics", "--json"]).output().unwrap();
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["mode"], "read_only");
+    assert_eq!(report["hardware_writes"], 0);
+    assert!(report["supported_fingerprint"].is_boolean());
+    assert!(report["ec_firmware_version"]["value"].is_null());
+    let identity = report["identity"].as_object().unwrap();
+    assert_eq!(identity.len(), 5);
+    for field in [
+        "manufacturer",
+        "model",
+        "bios_version",
+        "cpu",
+        "display_adapters",
+    ] {
+        assert!(identity.contains_key(field));
+    }
+    for args in [
+        ["diagnostics", "--write"],
+        ["diagnostics", "--enable-control"],
+    ] {
+        let rejected = binary().args(args).output().unwrap();
+        assert_eq!(rejected.status.code(), Some(2));
+        assert!(rejected.stdout.is_empty());
+    }
+}
+
+#[test]
 fn actual_binary_refuses_control_even_with_force() {
     for args in [
         vec!["fan", "0", "--force"],

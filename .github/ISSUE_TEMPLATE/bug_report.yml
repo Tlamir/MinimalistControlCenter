@@ -1,0 +1,27 @@
+name: Bug report
+description: Report app behavior, installation or a Windows Security block.
+body:
+  - type: input
+    id: version
+    attributes:
+      label: App version and Windows version
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: What happened?
+      description: Include steps, expected behavior and actual behavior. For startup issues, say whether manual launch works.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Reviewed diagnostic report
+      description: Run mcc.exe diagnostics without elevation and attach the reviewed JSON. Older releases can use mcc.exe status --json. Omit private information.
+      render: json
+  - type: textarea
+    id: security
+    attributes:
+      label: Windows Security details, if applicable
+      description: Exact detection name, affected file or command, time, app version and SHA256 hash. Redact usernames in paths. Do not restore quarantined files to collect this information.

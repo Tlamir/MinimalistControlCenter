@@ -28,7 +28,7 @@ Initial mode byte1873=0. Support1 byte1893=224, support2 byte1894=131. Newer rul
 
 Actual AUTO -> BOOST64 -> AUTO0 passed with five-second persistence, readback and owner-observed acceleration/return. The existing launcher was temporarily stopped/restored. No table or power-limit writes occurred. NVAPI read38°C; CPU/RPM candidates uncalibrated. Physical lighting/switch validation remains pending.
 
-See SAFETY.md for the current boundary and ../CONTINUATION.md for unfinished work. Findings below describe the earlier diagnostic stage, not the current executable.
+See SAFETY.md for the current boundary and MISSING_FEATURES.md for unfinished work. Findings below describe the earlier diagnostic stage, not the current executable.
 
 Investigated 9 October 2026. This document contains independently written observations, not vendor source. Installed `GamingCenter.exe` and `MySettingDLL.dll` were statically decompiled with ILSpy's decompiler library. Their hashes are recorded in PLAN.md. No vendor assembly was executed. Decompiler output remains in an ignored local directory.
 

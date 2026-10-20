@@ -3,6 +3,7 @@ pub mod cli;
 pub mod control;
 #[cfg(windows)]
 pub mod desktop;
+pub mod diagnostics;
 pub mod elevation;
 #[cfg(windows)]
 pub mod gpu;

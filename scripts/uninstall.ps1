@@ -84,7 +84,7 @@ try {
     $result = $registry.DeleteKey([uint32]2147483650,$key)
     if ($result.ReturnValue -notin @(0,2)) { throw 'Could not remove uninstall registration' }
     # Delete known files only after checking their absolute paths. Preserve profiles and unknown files.
-    $files = @('mcc.exe','mcc-ui.exe','README.md','icon.svg','BENCHMARKS.md','FAN_SUPPORT.md','OWNER_CHECKS.md','SAFETY.md','PROTOCOL.md','CONTINUATION.md','BUILD.md','benchmarks.svg','BENCHMARKS.json','LICENSE','THIRD_PARTY_NOTICES.md','RUST-RUNTIME-NOTICES.html','Uninstall.ps1','VERSION')
+    $files = @('mcc.exe','mcc-ui.exe','README.md','icon.svg','app.ico','BENCHMARKS.md','FAN_SUPPORT.md','OWNER_CHECKS.md','SAFETY.md','PROTOCOL.md','CONTINUATION.md','BUILD.md','benchmarks.svg','BENCHMARKS.json','LICENSE','THIRD_PARTY_NOTICES.md','RUST-RUNTIME-NOTICES.html','Uninstall.ps1','VERSION')
     if (Test-Path -LiteralPath $root) {
         foreach ($directory in Get-ChildItem -LiteralPath $root -Directory) {
             if ($directory.Name -notmatch '^\d+\.\d+\.\d+$') { continue }

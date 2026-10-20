@@ -65,6 +65,7 @@ fn execute(command: Command) -> Result<(), String> {
         }
         Command::Help => output(cli::HELP),
         Command::Version => output(concat!("mcc ", env!("CARGO_PKG_VERSION"))),
+        Command::Diagnostics => pretty(&mcc::diagnostics::collect()),
         Command::Hardware { action } => hardware(action),
         Command::Lighting { config } => {
             #[cfg(windows)]

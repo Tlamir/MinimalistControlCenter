@@ -3,6 +3,7 @@
 pub enum Command {
     Help,
     Version,
+    Diagnostics,
     Status {
         json: bool,
     },
@@ -51,6 +52,7 @@ pub const HELP: &str = concat!(
     "\n\n\
 Usage:\n  mcc status [--json]\n  mcc schema [--json]\n  mcc watch [--seconds 10] [--interval-ms 1000] [--json]\n  mcc bench [--iterations 1000000]\n  mcc simulate\n  mcc hardware status\n  mcc hardware calibration-probe\n  mcc hardware fan-auto|fan-boost\n  mcc hardware key-lock-on|key-lock-off|usb-on|usb-off|light-bar-on|light-bar-off\n  mcc lighting off|solid|breathing|rainbow|wave BRIGHTNESS SPEED RRGGBB DIRECTION\n  mcc power balanced|saver|performance\n  mcc-ui.exe [--connect|--tray|--enable-startup|--disable-startup]\n\n\
 schema: opt-in WMI metadata only, bounded to 10 seconds. No vendor methods run.\n\
+diagnostics [--json]: shareable model/BIOS/CPU/GPU report; no EC access or elevation.\n\
 watch: OS counters only; 1–3600 seconds, 250–60000 ms interval.\n\
 bench/simulate: synthetic in-memory policy only; never control real fans.\n\
 Hardware commands are explicit, fingerprint/capability/ownership gated.\n\
@@ -73,6 +75,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         );
     }
     match name {
+        "diagnostics" if args.len() == 1 || (args.len() == 2 && args[1] == "--json") => {
+            Ok(Command::Diagnostics)
+        }
         "startup" if args.len() == 2 => Ok(Command::Startup {
             enabled: match args[1].as_str() {
                 "status" => None,
