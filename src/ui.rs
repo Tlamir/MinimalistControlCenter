@@ -40,13 +40,10 @@ const AUTO: u16 = 103;
 const BOOST: u16 = 104;
 const QUIET: u16 = 105;
 const STARTUP: u16 = 124;
-const CUSTOM: u16 = 125;
 const REGULAR: u16 = 126;
 const PRESET_DAILY: u16 = 132;
 const PRESET_HIGH: u16 = 133;
 const PRESET_BOOST: u16 = 134;
-const SAVE_CUSTOM: u16 = 127;
-const APPLY_CUSTOM: u16 = 128;
 const BALANCED: u16 = 106;
 const PERFORMANCE: u16 = 107;
 const APPLY_LIGHT: u16 = 108;
@@ -98,10 +95,10 @@ const SWITCH_OFF_HOT: COLORREF = rgb(176, 187, 181);
 const AMBER: COLORREF = rgb(190, 120, 20);
 // Logical (96 DPI) client size and the shared status strip below every page.
 const WIDTH: i32 = 720;
-const HEIGHT: i32 = 652;
-const STATS_Y: i32 = 500;
+const HEIGHT: i32 = 640;
+const STATS_Y: i32 = 488;
 const STATS_H: i32 = 90;
-const FOOTER_Y: i32 = 604;
+const FOOTER_Y: i32 = 592;
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
@@ -130,7 +127,6 @@ enum Job {
     Preset(Preset),
     Fan(FanMode),
     Power(PowerPlan),
-    Combination(FanMode, PowerPlan),
     Startup(bool),
     StartupStatus,
     Switch(Switch, bool),
@@ -307,15 +303,6 @@ fn operation(job: &Job, hw: &RefCell<Hardware>) -> Result<Completed, String> {
             )?;
             "Power plan updated."
         }
-        Job::Combination(fan, power) => {
-            mcc::presets::apply_combination(
-                Some(*fan),
-                Some(*power),
-                |f| hw.borrow_mut().fan(f),
-                mcc::desktop::power,
-            )?;
-            "Custom preset applied."
-        }
         Job::Preset(p) => {
             mcc::presets::apply(*p, |f| hw.borrow_mut().fan(f), mcc::desktop::power)?;
             match p {
@@ -435,7 +422,6 @@ fn worker_with(
             | Job::ReconnectPoll
             | Job::Preset(_)
             | Job::Fan(_)
-            | Job::Combination(_, _)
             | Job::Switch(_, _)
             | Job::Restore
     );
@@ -513,10 +499,6 @@ fn demo_worker(job: Job, c: &mut mcc::control::Capabilities, fail: &mut bool) ->
         Job::StartupConnect => c.light_bar_enabled = false,
         Job::Fan(f) => c.fan_mode_raw = f.byte(),
         Job::Power(p) => r.power = Some(p),
-        Job::Combination(f, p) => {
-            c.fan_mode_raw = f.byte();
-            r.power = Some(p);
-        }
         Job::Preset(p) => {
             c.fan_mode_raw = p.fan().byte();
             r.power = p.power();
@@ -599,7 +581,6 @@ struct App {
     settings: Settings,
     previous_cpu: Option<mcc::CpuTimes>,
     stats: [String; 3],
-    cpu_clock: String,
     levels: [Option<u8>; 3],
     battery_note: String,
     gpu: Option<(mcc::gpu::Sensors, Instant)>,
@@ -876,8 +857,6 @@ impl App {
                         | PRESET_HIGH
                         | PRESET_BOOST
                         | REGULAR
-                        | SAVE_CUSTOM
-                        | APPLY_CUSTOM
                         | KEY
                         | USB
                         | BAR
@@ -1055,9 +1034,8 @@ impl App {
             USB => ready && c.is_some_and(|c| c.usb_charging),
             BAR => ready && c.is_some_and(|c| c.light_bar),
             QUIET | BALANCED | PERFORMANCE => !busy,
-            REGULAR | PRESET_DAILY | PRESET_HIGH | SAVE_CUSTOM => ready,
+            REGULAR | PRESET_DAILY | PRESET_HIGH => ready,
             PRESET_BOOST => ready && c.is_some_and(|c| c.boost),
-            APPLY_CUSTOM => ready && self.settings.profiles.iter().any(|p| p.name == "Custom"),
             GPU_TEMP | STARTUP => !busy,
             // Lighting options stay in place and are disabled when the effect ignores them,
             // so the page layout never jumps.
@@ -1305,22 +1283,11 @@ impl App {
         let levels = [cpu, memory, battery];
         let battery_note = match (battery, s.ac_connected.value) {
             (Some(_), Some(true)) => "Plugged in",
-            (Some(_), Some(false)) => "On battery",
             _ => "",
         }
         .to_string();
-        let clock = s
-            .cpu_clock_mhz
-            .value
-            .map(|v| format!("{:.2} GHz", v as f64 / 1000.))
-            .unwrap_or_default();
-        if self.stats != stats
-            || self.cpu_clock != clock
-            || self.levels != levels
-            || self.battery_note != battery_note
-        {
+        if self.stats != stats || self.levels != levels || self.battery_note != battery_note {
             self.stats = stats;
-            self.cpu_clock = clock;
             self.levels = levels;
             self.battery_note = battery_note;
             let r = self.rect(32, STATS_Y, 656, STATS_H);
@@ -1458,58 +1425,6 @@ impl App {
                     );
                 }
             }
-            SAVE_CUSTOM => {
-                if self.session.ready() {
-                    let fan =
-                        self.session
-                            .capabilities
-                            .as_ref()
-                            .and_then(|c| match c.fan_mode_raw {
-                                0 => Some(FanMode::Auto),
-                                64 => Some(FanMode::Boost),
-                                _ => None,
-                            });
-                    if let (Some(fan), Some(power)) = (fan, self.power) {
-                        let mut settings = self.settings.clone();
-                        settings.profiles.retain(|p| p.name != "Custom");
-                        settings.profiles.push(mcc::settings::Profile {
-                            name: "Custom".into(),
-                            fan,
-                            power,
-                            lighting: self.lighting.clone(),
-                        });
-                        let result = if self.demo {
-                            Ok(())
-                        } else {
-                            std::env::current_exe()
-                                .map_err(|e| e.to_string())
-                                .and_then(|p| settings.save(&p.with_file_name("profiles.json")))
-                        };
-                        match result {
-                            Ok(()) => {
-                                self.settings = settings;
-                                self.message = "Saved the current fan + performance combination. It will not apply automatically.".into();
-                                self.error = false;
-                            }
-                            Err(e) => {
-                                self.message = format!("Could not save custom combination: {e}");
-                                self.error = true;
-                            }
-                        }
-                    } else {
-                        self.message = "Refresh first: a verified fan mode and Windows power plan are required to save.".into();
-                        self.error = true;
-                    }
-                    self.refresh_controls();
-                }
-            }
-            APPLY_CUSTOM => {
-                if self.session.ready() {
-                    if let Some(p) = self.settings.profiles.iter().find(|p| p.name == "Custom") {
-                        self.submit(Job::Combination(p.fan, p.power));
-                    }
-                }
-            }
             STARTUP => {
                 if self.demo {
                     self.startup = Some(mcc::startup::Status {
@@ -1522,11 +1437,6 @@ impl App {
                 } else {
                     self.submit(Job::Startup(!self.startup.is_some_and(|s| s.enabled)));
                 }
-            }
-            CUSTOM => {
-                self.message = "This laptop currently supports verified Automatic and Boost modes. Custom curves need reliable temperature readings and proven overheat recovery if the app stops. They remain unavailable until that protection is verified.".into();
-                self.error = false;
-                self.command(DETAILS);
             }
             KEY | USB | BAR => {
                 let s = match id {
@@ -1809,108 +1719,38 @@ impl App {
         self.draw_text(
             dc,
             &self.model,
-            self.rect(32, 24, 424, 34),
+            self.rect(32, 26, 424, 36),
             2,
             INK,
-            DT_SINGLELINE | DT_END_ELLIPSIS,
-        );
-        self.label(
-            dc,
-            &format!("Minimalist Control Center · {}", env!("CARGO_PKG_VERSION")),
-            32,
-            62,
-            424,
-            20,
-            3,
-            MUTED,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
         );
         // Segmented page switcher; the selected tab is drawn as a raised white segment.
-        self.round(dc, self.rect(32, 92, 656, 40), TRACK, TRACK, 12);
+        self.round(dc, self.rect(32, 80, 656, 40), TRACK, TRACK, 12);
         match self.page {
             Page::Cooling => {
-                self.label(dc, "Quick presets", 32, 150, 400, 24, 1, INK);
-                self.round(dc, self.rect(32, 258, 656, 156), WHITE, BORDER, 16);
-                self.label(dc, "Fans", 52, 270, 400, 24, 1, INK);
-                self.label(dc, "Windows power", 52, 342, 616, 24, 1, INK);
+                self.round(dc, self.rect(32, 216, 656, 168), WHITE, BORDER, 16);
+                self.label(dc, "Fans", 52, 230, 400, 24, 1, INK);
+                self.label(dc, "Windows power", 52, 304, 616, 24, 1, INK);
             }
             Page::Lighting => {
-                self.round(dc, self.rect(32, 148, 656, 270), WHITE, BORDER, 16);
-                self.label(dc, "Keyboard", 52, 162, 120, 30, 1, INK);
-                self.label(
-                    dc,
-                    if self.last_lighting_sent.as_ref() == Some(&self.lighting) {
-                        "Applied"
-                    } else {
-                        "Not applied yet"
-                    },
-                    140,
-                    166,
-                    280,
-                    22,
-                    3,
-                    MUTED,
-                );
+                self.round(dc, self.rect(32, 136, 656, 268), WHITE, BORDER, 16);
+                self.label(dc, "Keyboard", 52, 152, 300, 26, 1, INK);
                 let off = self.lighting.effect == Effect::Off;
-                let animated = self.animated();
-                self.label(dc, "Effect", 52, 202, 280, 22, 3, MUTED);
-                self.label(dc, "Brightness", 364, 202, 280, 22, 3, MUTED);
-                self.label(
-                    dc,
-                    "Color",
-                    52,
-                    273,
-                    280,
-                    22,
-                    3,
-                    if off { BORDER_HOT } else { MUTED },
-                );
-                let (speed, direction) = if animated {
-                    ("Animation speed", "Direction")
-                } else {
-                    (
-                        "Animation speed · animated effects",
-                        "Direction · animated effects",
-                    )
-                };
-                let tone = if animated { MUTED } else { BORDER_HOT };
-                self.label(dc, speed, 52, 346, 300, 22, 3, tone);
-                self.label(dc, direction, 364, 346, 300, 22, 3, tone);
-                self.round(dc, self.rect(32, 430, 656, 56), WHITE, BORDER, 16);
-                self.label(dc, "Light bar", 52, 438, 380, 24, 1, INK);
-                self.label(
-                    dc,
-                    "Turned off at every sign-in",
-                    52,
-                    462,
-                    460,
-                    18,
-                    3,
-                    MUTED,
-                );
+                let tone = |enabled: bool| if enabled { MUTED } else { BORDER_HOT };
+                self.label(dc, "Effect", 52, 190, 280, 22, 3, MUTED);
+                self.label(dc, "Brightness", 364, 190, 280, 22, 3, MUTED);
+                self.label(dc, "Color", 52, 261, 280, 22, 3, tone(!off));
+                self.label(dc, "Speed", 52, 334, 280, 22, 3, tone(self.animated()));
+                self.label(dc, "Direction", 364, 334, 280, 22, 3, tone(self.animated()));
+                self.round(dc, self.rect(32, 416, 656, 56), WHITE, BORDER, 16);
+                self.label(dc, "Light bar", 52, 432, 380, 24, 1, INK);
             }
             Page::Settings => {
-                self.round(dc, self.rect(32, 148, 656, 140), WHITE, BORDER, 16);
-                self.label(dc, "Lock Windows key", 52, 161, 460, 28, 1, INK);
-                self.label(dc, "Disables the Windows key", 52, 186, 460, 20, 3, MUTED);
-                self.label(dc, "USB charging in hibernation", 52, 226, 460, 28, 1, INK);
-                self.label(dc, "Supported USB port", 52, 253, 460, 20, 3, MUTED);
-                self.round(dc, self.rect(32, 300, 656, 87), WHITE, BORDER, 16);
-                self.label(dc, "Start with Windows", 52, 314, 420, 28, 1, INK);
-                self.label(
-                    dc,
-                    if self.startup.is_some_and(|s| s.managed) {
-                        "Start in tray · light bar off"
-                    } else {
-                        "Install to enable startup controls"
-                    },
-                    52,
-                    341,
-                    460,
-                    20,
-                    3,
-                    MUTED,
-                );
-                self.label(dc, "Windows tools", 32, 401, 656, 24, 1, INK);
+                self.round(dc, self.rect(32, 136, 656, 112), WHITE, BORDER, 16);
+                self.label(dc, "Lock Windows key", 52, 152, 460, 24, 1, INK);
+                self.label(dc, "USB charging while off", 52, 208, 460, 24, 1, INK);
+                self.round(dc, self.rect(32, 260, 656, 56), WHITE, BORDER, 16);
+                self.label(dc, "Start with Windows", 52, 276, 420, 24, 1, INK);
             }
         }
         self.paint_stats(dc);
@@ -1932,21 +1772,9 @@ impl App {
             .map(|(s, _)| s);
         let gpu_temp = sample.and_then(|s| s.temperature_c);
         let gpu_value = gpu_temp.map_or("—".into(), |t| format!("{t} °C"));
-        let gpu_note = match sample.map(|s| (s.clock_mhz, s.fan_rpm)) {
-            Some((Some(c), _)) => format!("{c} MHz"),
-            Some((None, Some(f))) => format!("{f} RPM"),
-            Some(_) => String::new(),
-            None => "Read on demand".into(),
-        };
-        // Each tile: name, large value with a short note, and a level bar.
+        // Each tile: name, large value, an optional short state note, and a level bar.
         let tiles = [
-            (
-                "CPU",
-                self.stats[0].as_str(),
-                self.cpu_clock.as_str(),
-                self.levels[0],
-                90,
-            ),
+            ("CPU", self.stats[0].as_str(), "", self.levels[0], 90),
             ("Memory", &self.stats[1], "", self.levels[1], 90),
             (
                 "Battery",
@@ -1958,7 +1786,7 @@ impl App {
             (
                 "GPU",
                 &gpu_value,
-                &gpu_note,
+                "",
                 gpu_temp.map(|t| t.clamp(0, 100) as u8),
                 85,
             ),
@@ -2223,37 +2051,18 @@ impl App {
         } else {
             INK
         };
-        if matches!(id, REGULAR | PRESET_DAILY | PRESET_HIGH | PRESET_BOOST) {
-            let mut title = r;
-            title.top += self.px(10);
-            title.bottom = title.top + self.px(25);
-            self.draw_text(d.hDC, &s, title, 1, color, DT_CENTER | DT_SINGLELINE);
-            let mut detail = r;
-            detail.top += self.px(36);
-            self.draw_text(
-                d.hDC,
-                match id {
-                    REGULAR => "Auto · Saver",
-                    PRESET_HIGH => "Auto · Performance",
-                    PRESET_BOOST => "Boost · Keep power",
-                    _ => "Auto · Balanced",
-                },
-                detail,
-                3,
-                MUTED,
-                DT_CENTER | DT_SINGLELINE,
-            );
-        } else {
+        {
             let choice = matches!(id, EFFECT | BRIGHTNESS | SPEED | DIRECTION);
             if choice {
                 r.left += self.px(16);
                 r.right -= self.px(34);
             }
+            let preset = matches!(id, REGULAR | PRESET_DAILY | PRESET_HIGH | PRESET_BOOST);
             self.draw_text(
                 d.hDC,
                 &s,
                 r,
-                if nav || primary {
+                if nav || primary || preset {
                     1
                 } else if id == GPU_TEMP {
                     3
@@ -2715,7 +2524,6 @@ pub fn run() {
         settings,
         previous_cpu: None,
         stats: Default::default(),
-        cpu_clock: String::new(),
         levels: [None; 3],
         battery_note: String::new(),
         gpu: None,
@@ -2748,29 +2556,26 @@ pub fn run() {
         dashboard_us: 0,
     };
     caption(hwnd, &format!("{} · Minimalist Control Center", a.model));
-    a.button("Enable controls", CONNECT, None, (468, 28, 148, 36));
-    a.button("Exit", QUIT, None, (628, 28, 60, 36));
-    a.button("Cooling", COOLING, None, (36, 96, 216, 32));
-    a.button("Lighting", LIGHTING, None, (252, 96, 216, 32));
-    a.button("Settings", SETTINGS, None, (468, 96, 216, 32));
+    a.button("Enable controls", CONNECT, None, (468, 26, 148, 36));
+    a.button("Exit", QUIT, None, (628, 26, 60, 36));
+    a.button("Cooling", COOLING, None, (36, 84, 216, 32));
+    a.button("Lighting", LIGHTING, None, (252, 84, 216, 32));
+    a.button("Settings", SETTINGS, None, (468, 84, 216, 32));
     let c = Some(Page::Cooling);
     let l = Some(Page::Lighting);
     let s = Some(Page::Settings);
-    a.button("Office", REGULAR, c, (32, 180, 155, 64));
-    a.button("Balanced", PRESET_DAILY, c, (199, 180, 155, 64));
-    a.button("Performance", PRESET_HIGH, c, (366, 180, 155, 64));
-    a.button("Boost", PRESET_BOOST, c, (533, 180, 155, 64));
-    a.button("Automatic", AUTO, c, (52, 298, 298, 32));
-    a.button("Boost", BOOST, c, (370, 298, 298, 32));
-    a.button("Power Saver", QUIET, c, (52, 370, 194, 32));
-    a.button("Balanced", BALANCED, c, (263, 370, 194, 32));
-    a.button("Performance", PERFORMANCE, c, (474, 370, 194, 32));
-    a.button("Apply custom", APPLY_CUSTOM, c, (32, 430, 208, 34));
-    a.button("Save as custom", SAVE_CUSTOM, c, (256, 430, 208, 34));
-    a.button("Fan support", CUSTOM, c, (480, 430, 208, 34));
-    a.button("Apply", APPLY_LIGHT, l, (548, 161, 120, 32));
-    a.button("Solid", EFFECT, l, (52, 227, 296, 34));
-    a.button("High", BRIGHTNESS, l, (364, 227, 304, 34));
+    a.button("Office", REGULAR, c, (32, 136, 155, 64));
+    a.button("Balanced", PRESET_DAILY, c, (199, 136, 155, 64));
+    a.button("Performance", PRESET_HIGH, c, (366, 136, 155, 64));
+    a.button("Boost", PRESET_BOOST, c, (533, 136, 155, 64));
+    a.button("Automatic", AUTO, c, (52, 258, 298, 34));
+    a.button("Boost", BOOST, c, (370, 258, 298, 34));
+    a.button("Power Saver", QUIET, c, (52, 332, 194, 34));
+    a.button("Balanced", BALANCED, c, (263, 332, 194, 34));
+    a.button("Performance", PERFORMANCE, c, (474, 332, 194, 34));
+    a.button("Apply", APPLY_LIGHT, l, (548, 149, 120, 32));
+    a.button("Solid", EFFECT, l, (52, 215, 296, 34));
+    a.button("High", BRIGHTNESS, l, (364, 215, 304, 34));
     for (i, name) in ["Blue", "Purple", "Green", "Red", "Amber", "White"]
         .iter()
         .enumerate()
@@ -2779,21 +2584,31 @@ pub fn run() {
             name,
             SWATCH + i as u16,
             l,
-            (52 + i as i32 * 50, 298, 40, 36),
+            (52 + i as i32 * 50, 286, 40, 36),
         );
     }
-    a.button("Custom color…", COLOR, l, (364, 298, 304, 36));
-    a.button("Medium", SPEED, l, (52, 371, 296, 34));
-    a.button("Left → right", DIRECTION, l, (364, 371, 304, 34));
-    a.button("Unavailable", BAR, l, (616, 442, 52, 32));
-    a.button("Unavailable", KEY, s, (616, 167, 52, 32));
-    a.button("Unavailable", USB, s, (616, 232, 52, 32));
-    a.button("Off", STARTUP, s, (616, 327, 52, 32));
-    a.button("Turn screen off", SCREEN_OFF, s, (32, 429, 208, 34));
-    a.button("Graphics settings", GPU, s, (256, 429, 208, 34));
-    a.button("Use original controller", RESTORE, s, (480, 429, 208, 34));
+    a.button("Custom color…", COLOR, l, (364, 286, 304, 36));
+    a.button("Medium", SPEED, l, (52, 359, 296, 34));
+    a.button("Left → right", DIRECTION, l, (364, 359, 304, 34));
+    a.button("Unavailable", BAR, l, (616, 428, 52, 32));
+    a.button("Unavailable", KEY, s, (616, 148, 52, 32));
+    a.button("Unavailable", USB, s, (616, 204, 52, 32));
+    a.button("Off", STARTUP, s, (616, 272, 52, 32));
+    a.button("Turn screen off", SCREEN_OFF, s, (32, 332, 208, 34));
+    a.button("Graphics settings", GPU, s, (256, 332, 208, 34));
+    a.button("Use original controller", RESTORE, s, (480, 332, 208, 34));
     a.button("Read", GPU_TEMP, None, (612, STATS_Y + 8, 60, 26));
     a.button("Details", DETAILS, None, (596, FOOTER_Y, 92, 32));
+    // Focus outlines appear only after keyboard navigation, as in standard Windows dialogs.
+    // SAFETY: Live top-level window; standard UI-state message propagated to its children.
+    unsafe {
+        SendMessageW(
+            hwnd,
+            WM_CHANGEUISTATE,
+            ((UISF_HIDEFOCUS << 16) | UIS_SET) as usize,
+            0,
+        );
+    }
     if demo {
         a.session.complete(Some((demo_caps(), true)), false);
         a.message = "Preview only · all hardware actions are simulated.".into();
@@ -2808,7 +2623,6 @@ pub fn run() {
             a.stats = ["4%".into(), "40%".into(), "84%".into()];
             a.levels = [Some(4), Some(40), Some(84)];
             a.battery_note = "Plugged in".into();
-            a.cpu_clock = "2.20 GHz".into();
             a.startup = Some(mcc::startup::Status {
                 enabled: true,
                 managed: true,
@@ -3055,17 +2869,6 @@ mod tests {
         let r = demo_worker(Job::Fan(FanMode::Auto), &mut c, &mut false);
         assert_eq!(c.fan_mode_raw, 0);
         assert!(r.power.is_none());
-        for fan in [FanMode::Auto, FanMode::Boost] {
-            for plan in [
-                PowerPlan::PowerSaver,
-                PowerPlan::Balanced,
-                PowerPlan::HighPerformance,
-            ] {
-                let r = demo_worker(Job::Combination(fan, plan), &mut c, &mut false);
-                assert_eq!(c.fan_mode_raw, fan.byte());
-                assert_eq!(r.power, Some(plan));
-            }
-        }
     }
     #[test]
     fn passive_full_recovery_reads_once_and_failed_narrow_poll_discards_state() {
