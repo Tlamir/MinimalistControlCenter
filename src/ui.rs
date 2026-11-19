@@ -60,10 +60,21 @@ const RESTORE: u16 = 123;
 const COOLING: u16 = 201;
 const LIGHTING: u16 = 202;
 const SETTINGS: u16 = 203;
-const EFFECT: u16 = 210;
-const BRIGHTNESS: u16 = 211;
-const SPEED: u16 = 212;
-const DIRECTION: u16 = 213;
+// Lighting options are segmented controls: one button id per choice.
+const EFFECT: u16 = 230; // 230..=234, EFFECTS order
+const BRIGHTNESS: u16 = 240; // 240..=243, brightness 1..=4
+const SPEED: u16 = 250; // 250..=254, speed 0..=4
+const DIRECTION: u16 = 260; // 260..=263, DIRECTIONS order
+const EFFECTS: [(Effect, &str); 5] = [
+    (Effect::Off, "Off"),
+    (Effect::Solid, "Solid"),
+    (Effect::Breathing, "Breathing"),
+    (Effect::Rainbow, "Rainbow"),
+    (Effect::Wave, "Wave"),
+];
+const BRIGHTNESS_LEVELS: [&str; 4] = ["Low", "Medium", "High", "Max"];
+/// (firmware direction value, arrow) in on-screen order.
+const DIRECTIONS: [(u8, &str); 4] = [(2, "←"), (1, "→"), (3, "↑"), (4, "↓")];
 const COLOR: u16 = 214;
 const SWATCH: u16 = 220;
 const PALETTE: [[u8; 3]; 6] = [
@@ -872,7 +883,7 @@ impl App {
         for (effect, enabled) in [(Effect::Solid, false), (Effect::Wave, true)] {
             self.lighting.effect = effect;
             self.refresh_controls();
-            for id in [SPEED, DIRECTION] {
+            for id in [SPEED, SPEED + 4, DIRECTION, DIRECTION + 3] {
                 // SAFETY: Query style of this UI's existing control.
                 let style = unsafe { GetWindowLongW(self.handle(id), GWL_STYLE) } as u32;
                 passed &= (style & WS_DISABLED == 0) == enabled && style & WS_VISIBLE != 0;
@@ -989,27 +1000,6 @@ impl App {
                 },
             );
         }
-        caption(
-            self.handle(EFFECT),
-            ["Off", "Solid", "Breathing", "Rainbow", "Wave"][self.effect_index()],
-        );
-        caption(
-            self.handle(BRIGHTNESS),
-            ["Off", "Low", "Medium", "High", "Maximum"][self.lighting.brightness as usize],
-        );
-        caption(
-            self.handle(SPEED),
-            ["Slowest", "Slow", "Medium", "Fast", "Fastest"][self.lighting.speed as usize],
-        );
-        caption(
-            self.handle(DIRECTION),
-            [
-                "Left → right",
-                "Right → left",
-                "Bottom → top",
-                "Top → bottom",
-            ][self.lighting.direction as usize - 1],
-        );
         for b in &self.buttons {
             let visible = b.page.is_none_or(|p| p == self.page);
             let enabled = self.enabled(b.id, self.session.busy);
@@ -1040,7 +1030,8 @@ impl App {
             GPU_TEMP | STARTUP => !busy,
             // Lighting options stay in place and are disabled when the effect ignores them,
             // so the page layout never jumps.
-            SPEED | DIRECTION => self.animated(),
+            SPEED..=254 | DIRECTION..=263 => self.animated(),
+            BRIGHTNESS..=243 => self.lighting.effect != Effect::Off,
             COLOR => self.lighting.effect != Effect::Off,
             SWATCH..=225 => self.lighting.effect != Effect::Off,
             _ => true,
@@ -1051,16 +1042,6 @@ impl App {
             self.lighting.effect,
             Effect::Breathing | Effect::Rainbow | Effect::Wave
         )
-    }
-    fn effect_index(&self) -> usize {
-        match self.lighting.effect {
-            Effect::Off => 0,
-            Effect::Solid => 1,
-            Effect::Breathing => 2,
-            Effect::Rainbow => 3,
-            Effect::Wave => 4,
-            Effect::Reactive => 0,
-        }
     }
     /// Submit a request started by clicking control `id`, drawing that control as pending.
     fn submit_pending(&mut self, id: u16, job: Job) {
@@ -1333,36 +1314,6 @@ impl App {
         }
     }
 
-    fn choose(&self, id: u16, items: &[&str], current: usize) -> Option<usize> {
-        let mut r = RECT::default();
-        // SAFETY: Live child HWND, scoped popup menu and literal labels copied by Windows.
-        unsafe {
-            GetWindowRect(self.handle(id), &mut r);
-            let menu = CreatePopupMenu();
-            if menu.is_null() {
-                return None;
-            }
-            for (i, s) in items.iter().enumerate() {
-                AppendMenuW(
-                    menu,
-                    MF_STRING | if i == current { MF_CHECKED } else { 0 },
-                    1000 + i,
-                    wide(s).as_ptr(),
-                );
-            }
-            let n = TrackPopupMenu(
-                menu,
-                TPM_RETURNCMD | TPM_LEFTALIGN,
-                r.left,
-                r.bottom,
-                0,
-                self.hwnd,
-                ptr::null(),
-            );
-            DestroyMenu(menu);
-            (n >= 1000 && (n as usize) < 1000 + items.len()).then(|| n as usize - 1000)
-        }
-    }
     fn command(&mut self, id: u16) {
         match id {
             COOLING | LIGHTING | SETTINGS => {
@@ -1454,56 +1405,21 @@ impl App {
                     self.submit(Job::Light(self.lighting.clone()));
                 }
             }
-            EFFECT => {
-                if let Some(i) = self.choose(
-                    id,
-                    &["Off", "Solid", "Breathing", "Rainbow", "Wave"],
-                    self.effect_index(),
-                ) {
-                    self.lighting.effect = [
-                        Effect::Off,
-                        Effect::Solid,
-                        Effect::Breathing,
-                        Effect::Rainbow,
-                        Effect::Wave,
-                    ][i];
-                    self.refresh_controls();
-                }
+            EFFECT..=234 => {
+                self.lighting.effect = EFFECTS[(id - EFFECT) as usize].0;
+                self.refresh_controls();
             }
-            BRIGHTNESS => {
-                if let Some(i) = self.choose(
-                    id,
-                    &["Off", "Low", "Medium", "High", "Maximum"],
-                    self.lighting.brightness as usize,
-                ) {
-                    self.lighting.brightness = i as u8;
-                    self.refresh_controls();
-                }
+            BRIGHTNESS..=243 => {
+                self.lighting.brightness = (id - BRIGHTNESS) as u8 + 1;
+                self.refresh_controls();
             }
-            SPEED => {
-                if let Some(i) = self.choose(
-                    id,
-                    &["Slowest", "Slow", "Medium", "Fast", "Fastest"],
-                    self.lighting.speed as usize,
-                ) {
-                    self.lighting.speed = i as u8;
-                    self.refresh_controls();
-                }
+            SPEED..=254 => {
+                self.lighting.speed = (id - SPEED) as u8;
+                self.refresh_controls();
             }
-            DIRECTION => {
-                if let Some(i) = self.choose(
-                    id,
-                    &[
-                        "Left → right",
-                        "Right → left",
-                        "Bottom → top",
-                        "Top → bottom",
-                    ],
-                    self.lighting.direction as usize - 1,
-                ) {
-                    self.lighting.direction = i as u8 + 1;
-                    self.refresh_controls();
-                }
+            DIRECTION..=263 => {
+                self.lighting.direction = DIRECTIONS[(id - DIRECTION) as usize].0;
+                self.refresh_controls();
             }
             SWATCH..=225 => {
                 self.lighting.rgb = PALETTE[(id - SWATCH) as usize];
@@ -1738,17 +1654,28 @@ impl App {
                 self.round(dc, self.rect(316, 384, 352, 48), TRACK, TRACK, 12);
             }
             Page::Lighting => {
-                self.round(dc, self.rect(32, 136, 656, 268), WHITE, BORDER, 16);
+                self.round(dc, self.rect(32, 136, 656, 256), WHITE, BORDER, 16);
                 self.label(dc, "Keyboard", 52, 152, 300, 26, 1, INK);
-                let off = self.lighting.effect == Effect::Off;
-                let tone = |enabled: bool| if enabled { MUTED } else { BORDER_HOT };
-                self.label(dc, "Effect", 52, 190, 280, 22, 3, MUTED);
-                self.label(dc, "Brightness", 364, 190, 280, 22, 3, MUTED);
-                self.label(dc, "Color", 52, 261, 280, 22, 3, tone(!off));
-                self.label(dc, "Speed", 52, 334, 280, 22, 3, tone(self.animated()));
-                self.label(dc, "Direction", 364, 334, 280, 22, 3, tone(self.animated()));
-                self.round(dc, self.rect(32, 416, 656, 56), WHITE, BORDER, 16);
-                self.label(dc, "Light bar", 52, 432, 380, 24, 1, INK);
+                let tone = |enabled: bool| if enabled { MUTED } else { DISABLED };
+                let lit = self.lighting.effect != Effect::Off;
+                for (name, y, enabled) in [
+                    ("Effect", 202, true),
+                    ("Brightness", 250, lit),
+                    ("Color", 298, lit),
+                    ("Animation", 346, self.animated()),
+                ] {
+                    self.label(dc, name, 52, y, 110, 20, 3, tone(enabled));
+                }
+                for (x, y, w) in [
+                    (168, 192, 500),
+                    (168, 240, 500),
+                    (168, 336, 240),
+                    (420, 336, 248),
+                ] {
+                    self.round(dc, self.rect(x, y, w, 40), TRACK, TRACK, 12);
+                }
+                self.round(dc, self.rect(32, 404, 656, 56), WHITE, BORDER, 16);
+                self.label(dc, "Light bar", 52, 420, 380, 24, 1, INK);
             }
             Page::Settings => {
                 self.round(dc, self.rect(32, 136, 656, 112), WHITE, BORDER, 16);
@@ -1852,6 +1779,10 @@ impl App {
             PERFORMANCE => self.power == Some(PowerPlan::HighPerformance),
             STARTUP => self.startup.is_some_and(|s| s.enabled),
             COLOR => !PALETTE.contains(&self.lighting.rgb),
+            EFFECT..=234 => EFFECTS[(id - EFFECT) as usize].0 == self.lighting.effect,
+            BRIGHTNESS..=243 => self.lighting.brightness == (id - BRIGHTNESS) as u8 + 1,
+            SPEED..=254 => self.lighting.speed == (id - SPEED) as u8,
+            DIRECTION..=263 => self.lighting.direction == DIRECTIONS[(id - DIRECTION) as usize].0,
             KEY => self
                 .session
                 .capabilities
@@ -1903,7 +1834,18 @@ impl App {
         // Page tabs, fan modes and power plans share the segmented-control look.
         let nav = matches!(
             id,
-            COOLING | LIGHTING | SETTINGS | AUTO | BOOST | QUIET | BALANCED | PERFORMANCE
+            COOLING
+                | LIGHTING
+                | SETTINGS
+                | AUTO
+                | BOOST
+                | QUIET
+                | BALANCED
+                | PERFORMANCE
+                | EFFECT..=234
+                | BRIGHTNESS..=243
+                | SPEED..=254
+                | DIRECTION..=263
         );
         // Apply is the primary action only while the keyboard has unsent changes.
         let primary = id == APPLY_LIGHT && self.last_lighting_sent.as_ref() != Some(&self.lighting)
@@ -1939,10 +1881,6 @@ impl App {
                 | BALANCED
                 | PERFORMANCE
                 | APPLY_LIGHT
-                | EFFECT
-                | BRIGHTNESS
-                | SPEED
-                | DIRECTION
                 | COLOR
                 | BAR
                 | KEY
@@ -1998,10 +1936,24 @@ impl App {
             }
             return;
         }
-        if (SWATCH..=225).contains(&id) {
+        if (SWATCH..=225).contains(&id) || id == COLOR {
             // Color swatch: a circle; the chosen color gets a ring separated by a white gap.
-            let c = PALETTE[(id - SWATCH) as usize];
-            let active = c == self.lighting.rgb;
+            // The last circle opens the color picker and shows the custom color once chosen.
+            let custom = id == COLOR;
+            let c = if custom {
+                if selected {
+                    self.lighting.rgb
+                } else {
+                    [233, 238, 235]
+                }
+            } else {
+                PALETTE[(id - SWATCH) as usize]
+            };
+            let active = if custom {
+                selected
+            } else {
+                c == self.lighting.rgb
+            };
             let fill = if disabled {
                 // Faded toward white while the effect ignores color.
                 let f = |v: u8| ((u16::from(v) + 2 * 255) / 3) as u8;
@@ -2031,6 +1983,16 @@ impl App {
                 let edge = pale.then_some((BORDER, self.px(1).max(1) * s));
                 shape(dc, (dx * s, dy * s, dot * s, dot * s), fill, edge, dot * s);
             });
+            if custom && !active {
+                self.draw_text(
+                    d.hDC,
+                    "+",
+                    r,
+                    4,
+                    if disabled { DISABLED } else { MUTED },
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+            }
             if d.itemState & ODS_FOCUS != 0 && d.itemState & ODS_NOFOCUSRECT == 0 {
                 // SAFETY: Focus rectangle inside this item, using its live DC.
                 unsafe {
@@ -2061,17 +2023,12 @@ impl App {
             INK
         };
         {
-            let choice = matches!(id, EFFECT | BRIGHTNESS | SPEED | DIRECTION);
-            if choice {
-                r.left += self.px(16);
-                r.right -= self.px(34);
-            }
             let preset = matches!(id, REGULAR | PRESET_DAILY | PRESET_HIGH | PRESET_BOOST);
             self.draw_text(
                 d.hDC,
                 &s,
                 r,
-                if preset {
+                if preset || (DIRECTION..=263).contains(&id) {
                     4
                 } else if nav || primary {
                     1
@@ -2081,40 +2038,8 @@ impl App {
                     0
                 },
                 color,
-                (if choice { DT_LEFT } else { DT_CENTER }) | DT_VCENTER | DT_SINGLELINE,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             );
-            if id == COLOR && selected && !disabled {
-                // A custom color is in use: show it as a dot at the start of the button.
-                let size = self.px(16);
-                let dot = RECT {
-                    left: d.rcItem.left + self.px(16),
-                    top: (d.rcItem.top + d.rcItem.bottom - size) / 2,
-                    right: d.rcItem.left + self.px(16) + size,
-                    bottom: (d.rcItem.top + d.rcItem.bottom + size) / 2,
-                };
-                let [cr, cg, cb] = self.lighting.rgb;
-                smooth(d.hDC, dot, fill, |dc, s| {
-                    shape(
-                        dc,
-                        (0, 0, size * s, size * s),
-                        rgb(cr, cg, cb),
-                        Some((BORDER, s)),
-                        size * s,
-                    );
-                });
-            }
-            if choice {
-                let mut arrow = d.rcItem;
-                arrow.left = arrow.right - self.px(32);
-                self.draw_text(
-                    d.hDC,
-                    "▾",
-                    arrow,
-                    0,
-                    MUTED,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                );
-            }
         }
         if d.itemState & ODS_FOCUS != 0 && d.itemState & ODS_NOFOCUSRECT == 0 {
             // SAFETY: Focus rectangle inside this item, using its live DC.
@@ -2585,8 +2510,24 @@ pub fn run() {
     a.button("Balanced", BALANCED, c, (435, 388, 114, 40));
     a.button("Performance", PERFORMANCE, c, (549, 388, 115, 40));
     a.button("Apply", APPLY_LIGHT, l, (548, 149, 120, 32));
-    a.button("Solid", EFFECT, l, (52, 215, 296, 34));
-    a.button("High", BRIGHTNESS, l, (364, 215, 304, 34));
+    // Lighting rows: label column at x 52, controls from x 168 to 668.
+    for (i, (_, name)) in EFFECTS.iter().enumerate() {
+        let x = 172 + i as i32 * 98;
+        a.button(
+            name,
+            EFFECT + i as u16,
+            l,
+            (x, 196, if i == 4 { 100 } else { 98 }, 32),
+        );
+    }
+    for (i, name) in BRIGHTNESS_LEVELS.iter().enumerate() {
+        a.button(
+            name,
+            BRIGHTNESS + i as u16,
+            l,
+            (172 + i as i32 * 123, 244, 123, 32),
+        );
+    }
     for (i, name) in ["Blue", "Purple", "Green", "Red", "Amber", "White"]
         .iter()
         .enumerate()
@@ -2595,13 +2536,28 @@ pub fn run() {
             name,
             SWATCH + i as u16,
             l,
-            (52 + i as i32 * 50, 286, 40, 36),
+            (164 + i as i32 * 46, 288, 40, 40),
         );
     }
-    a.button("Custom color…", COLOR, l, (364, 286, 304, 36));
-    a.button("Medium", SPEED, l, (52, 359, 296, 34));
-    a.button("Left → right", DIRECTION, l, (364, 359, 304, 34));
-    a.button("Unavailable", BAR, l, (616, 428, 52, 32));
+    a.button("Custom color", COLOR, l, (164 + 6 * 46, 288, 40, 40));
+    for (i, name) in ["1", "2", "3", "4", "5"].iter().enumerate() {
+        let x = 172 + i as i32 * 46;
+        a.button(
+            name,
+            SPEED + i as u16,
+            l,
+            (x, 340, if i == 4 { 48 } else { 46 }, 32),
+        );
+    }
+    for (i, (_, arrow)) in DIRECTIONS.iter().enumerate() {
+        a.button(
+            arrow,
+            DIRECTION + i as u16,
+            l,
+            (424 + i as i32 * 60, 340, 60, 32),
+        );
+    }
+    a.button("Unavailable", BAR, l, (616, 416, 52, 32));
     a.button("Unavailable", KEY, s, (616, 148, 52, 32));
     a.button("Unavailable", USB, s, (616, 204, 52, 32));
     a.button("Off", STARTUP, s, (616, 272, 52, 32));
