@@ -624,6 +624,91 @@ thread_local! {
     /// The button under the mouse, for hover feedback. Touched only on the UI thread.
     static HOT:std::cell::Cell<HWND>=const {std::cell::Cell::new(ptr::null_mut())};
 }
+/// Draw anti-aliased shapes into `r`: `draw` paints at `SCALE`x size on `bg`, then the result
+/// is averaged down with HALFTONE. GDI itself has no anti-aliasing for curves.
+fn smooth(dc: HDC, r: RECT, bg: COLORREF, draw: impl FnOnce(HDC, i32)) {
+    const SCALE: i32 = 4;
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    // SAFETY: Scoped memory DC and bitmap; selections restored before deleting either.
+    unsafe {
+        let mem = CreateCompatibleDC(dc);
+        if mem.is_null() {
+            return;
+        }
+        let bitmap = CreateCompatibleBitmap(dc, w * SCALE, h * SCALE);
+        if bitmap.is_null() {
+            DeleteDC(mem);
+            return;
+        }
+        let old = SelectObject(mem, bitmap);
+        let brush = CreateSolidBrush(bg);
+        FillRect(
+            mem,
+            &RECT {
+                left: 0,
+                top: 0,
+                right: w * SCALE,
+                bottom: h * SCALE,
+            },
+            brush,
+        );
+        DeleteObject(brush);
+        draw(mem, SCALE);
+        let mode = SetStretchBltMode(dc, HALFTONE);
+        let mut origin = POINT::default();
+        SetBrushOrgEx(dc, 0, 0, &mut origin);
+        StretchBlt(
+            dc,
+            r.left,
+            r.top,
+            w,
+            h,
+            mem,
+            0,
+            0,
+            w * SCALE,
+            h * SCALE,
+            SRCCOPY,
+        );
+        SetBrushOrgEx(dc, origin.x, origin.y, ptr::null_mut());
+        SetStretchBltMode(dc, mode);
+        SelectObject(mem, old);
+        DeleteObject(bitmap);
+        DeleteDC(mem);
+    }
+}
+/// Filled rounded rectangle (a circle or pill when `radius` is the full size) with an optional
+/// inner border of (color, width).
+fn shape(
+    dc: HDC,
+    (x, y, w, h): (i32, i32, i32, i32),
+    fill: COLORREF,
+    border: Option<(COLORREF, i32)>,
+    radius: i32,
+) {
+    // SAFETY: Scoped GDI pen and brush; previous selections restored before deletion.
+    unsafe {
+        let (color, width) = border.unwrap_or((fill, 0));
+        let brush = CreateSolidBrush(fill);
+        let pen = if width > 0 {
+            CreatePen(PS_INSIDEFRAME, width, color)
+        } else {
+            CreatePen(PS_NULL, 0, 0)
+        };
+        let ob = SelectObject(dc, brush);
+        let op = SelectObject(dc, pen);
+        // A null pen leaves the right/bottom edge one pixel short; extend it to compensate.
+        let extra = i32::from(width == 0);
+        RoundRect(dc, x, y, x + w + extra, y + h + extra, radius, radius);
+        SelectObject(dc, ob);
+        SelectObject(dc, op);
+        DeleteObject(brush);
+        DeleteObject(pen);
+    }
+}
 /// Button subclass that tracks hover. It never reads or borrows `APP`.
 unsafe extern "system" fn button_procedure(
     hwnd: HWND,
@@ -1933,6 +2018,7 @@ impl App {
             BALANCED => self.power == Some(PowerPlan::Balanced),
             PERFORMANCE => self.power == Some(PowerPlan::HighPerformance),
             STARTUP => self.startup.is_some_and(|s| s.enabled),
+            COLOR => !PALETTE.contains(&self.lighting.rgb),
             KEY => self
                 .session
                 .capabilities
@@ -2040,13 +2126,6 @@ impl App {
         }
         if matches!(id, KEY | USB | BAR | STARTUP) {
             // On/off settings are drawn as a switch; the caption remains for accessibility.
-            let (w, h) = (self.px(44), self.px(24));
-            let mut track = RECT {
-                left: r.right - w,
-                top: (r.top + r.bottom - h) / 2,
-                right: r.right,
-                bottom: (r.top + r.bottom + h) / 2,
-            };
             let color = if disabled {
                 TRACK
             } else if selected {
@@ -2056,19 +2135,72 @@ impl App {
             } else {
                 SWITCH_OFF
             };
-            self.round(d.hDC, track, color, color, 24);
+            let (w, h) = (r.right - r.left, r.bottom - r.top);
+            let (tw, th) = (self.px(44), self.px(24));
+            let (tx, ty) = (w - tw, (h - th) / 2);
             let inset = self.px(3);
-            let knob = h - 2 * inset;
-            track.top += inset;
-            track.bottom = track.top + knob;
-            if selected {
-                track.right -= inset;
-                track.left = track.right - knob;
+            let knob = th - 2 * inset;
+            let kx = if selected {
+                tx + tw - inset - knob
             } else {
-                track.left += inset;
-                track.right = track.left + knob;
+                tx + inset
+            };
+            smooth(d.hDC, r, WHITE, |dc, s| {
+                shape(dc, (tx * s, ty * s, tw * s, th * s), color, None, th * s);
+                shape(
+                    dc,
+                    ((kx) * s, (ty + inset) * s, knob * s, knob * s),
+                    WHITE,
+                    None,
+                    knob * s,
+                );
+            });
+            // SAFETY: Restore DC state saved on entry.
+            unsafe {
+                RestoreDC(d.hDC, saved);
             }
-            self.round(d.hDC, track, WHITE, WHITE, 24);
+            return;
+        }
+        if (SWATCH..=225).contains(&id) {
+            // Color swatch: a circle; the chosen color gets a ring separated by a white gap.
+            let c = PALETTE[(id - SWATCH) as usize];
+            let active = c == self.lighting.rgb;
+            let fill = if disabled {
+                // Faded toward white while the effect ignores color.
+                let f = |v: u8| ((u16::from(v) + 2 * 255) / 3) as u8;
+                rgb(f(c[0]), f(c[1]), f(c[2]))
+            } else {
+                rgb(c[0], c[1], c[2])
+            };
+            let (w, h) = (r.right - r.left, r.bottom - r.top);
+            let ring = self.px(34).min(w).min(h);
+            let dot = self.px(24);
+            let (rx, ry) = ((w - ring) / 2, (h - ring) / 2);
+            let (dx, dy) = ((w - dot) / 2, (h - dot) / 2);
+            let line = self.px(2);
+            smooth(d.hDC, r, WHITE, |dc, s| {
+                if !disabled && (active || hot) {
+                    let tone = if active { INK } else { BORDER_HOT };
+                    shape(
+                        dc,
+                        (rx * s, ry * s, ring * s, ring * s),
+                        WHITE,
+                        Some((tone, line * s)),
+                        ring * s,
+                    );
+                }
+                // Light colors get a hairline so they stay visible on white.
+                let pale = c.iter().all(|v| *v > 200);
+                let edge = pale.then_some((BORDER, self.px(1).max(1) * s));
+                shape(dc, (dx * s, dy * s, dot * s, dot * s), fill, edge, dot * s);
+            });
+            if d.itemState & ODS_FOCUS != 0 && d.itemState & ODS_NOFOCUSRECT == 0 {
+                // SAFETY: Focus rectangle inside this item, using its live DC.
+                unsafe {
+                    InflateRect(&mut r, -self.px(1), -self.px(1));
+                    DrawFocusRect(d.hDC, &r);
+                }
+            }
             // SAFETY: Restore DC state saved on entry.
             unsafe {
                 RestoreDC(d.hDC, saved);
@@ -2091,38 +2223,7 @@ impl App {
         } else {
             INK
         };
-        if (SWATCH..=225).contains(&id) {
-            let c = PALETTE[(id - SWATCH) as usize];
-            let active = c == self.lighting.rgb;
-            let p = self.px(5);
-            r.left += p;
-            r.top += p;
-            r.right -= p;
-            r.bottom -= p;
-            self.round(
-                d.hDC,
-                r,
-                if disabled {
-                    // Faded toward white while the effect ignores color.
-                    let f = |v: u8| ((u16::from(v) + 2 * 255) / 3) as u8;
-                    rgb(f(c[0]), f(c[1]), f(c[2]))
-                } else {
-                    rgb(c[0], c[1], c[2])
-                },
-                if active { GREEN } else { BORDER },
-                10,
-            );
-            if active {
-                self.draw_text(
-                    d.hDC,
-                    "✓",
-                    r,
-                    1,
-                    if id == 225 { INK } else { WHITE },
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                );
-            }
-        } else if matches!(id, REGULAR | PRESET_DAILY | PRESET_HIGH | PRESET_BOOST) {
+        if matches!(id, REGULAR | PRESET_DAILY | PRESET_HIGH | PRESET_BOOST) {
             let mut title = r;
             title.top += self.px(10);
             title.bottom = title.top + self.px(25);
@@ -2162,6 +2263,26 @@ impl App {
                 color,
                 (if choice { DT_LEFT } else { DT_CENTER }) | DT_VCENTER | DT_SINGLELINE,
             );
+            if id == COLOR && selected && !disabled {
+                // A custom color is in use: show it as a dot at the start of the button.
+                let size = self.px(16);
+                let dot = RECT {
+                    left: d.rcItem.left + self.px(16),
+                    top: (d.rcItem.top + d.rcItem.bottom - size) / 2,
+                    right: d.rcItem.left + self.px(16) + size,
+                    bottom: (d.rcItem.top + d.rcItem.bottom + size) / 2,
+                };
+                let [cr, cg, cb] = self.lighting.rgb;
+                smooth(d.hDC, dot, fill, |dc, s| {
+                    shape(
+                        dc,
+                        (0, 0, size * s, size * s),
+                        rgb(cr, cg, cb),
+                        Some((BORDER, s)),
+                        size * s,
+                    );
+                });
+            }
             if choice {
                 let mut arrow = d.rcItem;
                 arrow.left = arrow.right - self.px(32);
