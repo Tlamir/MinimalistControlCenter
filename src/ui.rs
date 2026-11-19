@@ -93,6 +93,7 @@ const GREEN_HOT: COLORREF = rgb(19, 96, 63);
 const SWITCH_OFF: COLORREF = rgb(196, 205, 200);
 const SWITCH_OFF_HOT: COLORREF = rgb(176, 187, 181);
 const AMBER: COLORREF = rgb(190, 120, 20);
+const DISABLED: COLORREF = rgb(168, 177, 172);
 // Logical (96 DPI) client size and the shared status strip below every page.
 const WIDTH: i32 = 720;
 const HEIGHT: i32 = 640;
@@ -1728,9 +1729,13 @@ impl App {
         self.round(dc, self.rect(32, 80, 656, 40), TRACK, TRACK, 12);
         match self.page {
             Page::Cooling => {
-                self.round(dc, self.rect(32, 216, 656, 168), WHITE, BORDER, 16);
-                self.label(dc, "Fans", 52, 230, 400, 24, 1, INK);
-                self.label(dc, "Windows power", 52, 304, 616, 24, 1, INK);
+                // Presets are the main controls (2x2 tiles above); fans and power are
+                // secondary segmented controls side by side.
+                self.round(dc, self.rect(32, 344, 656, 108), WHITE, BORDER, 16);
+                self.label(dc, "Fans", 52, 358, 240, 24, 3, MUTED);
+                self.label(dc, "Windows power", 316, 358, 340, 24, 3, MUTED);
+                self.round(dc, self.rect(52, 384, 248, 48), TRACK, TRACK, 12);
+                self.round(dc, self.rect(316, 384, 352, 48), TRACK, TRACK, 12);
             }
             Page::Lighting => {
                 self.round(dc, self.rect(32, 136, 656, 268), WHITE, BORDER, 16);
@@ -1895,7 +1900,11 @@ impl App {
         };
         // SAFETY: Windows supplies valid DC/RECT; save and restore isolate drawing state.
         let saved = unsafe { SaveDC(d.hDC) };
-        let nav = matches!(id, COOLING | LIGHTING | SETTINGS);
+        // Page tabs, fan modes and power plans share the segmented-control look.
+        let nav = matches!(
+            id,
+            COOLING | LIGHTING | SETTINGS | AUTO | BOOST | QUIET | BALANCED | PERFORMANCE
+        );
         // Apply is the primary action only while the keyboard has unsent changes.
         let primary = id == APPLY_LIGHT && self.last_lighting_sent.as_ref() != Some(&self.lighting)
             || id == CONNECT && !self.session.allowed;
@@ -1908,7 +1917,7 @@ impl App {
                 (TRACK, TRACK)
             }
         } else if disabled {
-            (BG, BORDER)
+            (WHITE, BORDER)
         } else if primary {
             (if pressed || hot { GREEN_HOT } else { GREEN }, GREEN)
         } else if selected {
@@ -2040,10 +2049,10 @@ impl App {
         // SAFETY: Owned child handle and correctly sized writable character buffer.
         let n = unsafe { GetWindowTextW(d.hwndItem, buffer.as_mut_ptr(), buffer.len() as i32) };
         let s = String::from_utf16_lossy(&buffer[..n.max(0) as usize]);
-        let color = if nav {
+        let color = if disabled {
+            DISABLED
+        } else if nav {
             if selected { INK } else { MUTED }
-        } else if disabled {
-            MUTED
         } else if primary {
             WHITE
         } else if selected {
@@ -2062,7 +2071,9 @@ impl App {
                 d.hDC,
                 &s,
                 r,
-                if nav || primary || preset {
+                if preset {
+                    4
+                } else if nav || primary {
                     1
                 } else if id == GPU_TEMP {
                     3
@@ -2564,15 +2575,15 @@ pub fn run() {
     let c = Some(Page::Cooling);
     let l = Some(Page::Lighting);
     let s = Some(Page::Settings);
-    a.button("Office", REGULAR, c, (32, 136, 155, 64));
-    a.button("Balanced", PRESET_DAILY, c, (199, 136, 155, 64));
-    a.button("Performance", PRESET_HIGH, c, (366, 136, 155, 64));
-    a.button("Boost", PRESET_BOOST, c, (533, 136, 155, 64));
-    a.button("Automatic", AUTO, c, (52, 258, 298, 34));
-    a.button("Boost", BOOST, c, (370, 258, 298, 34));
-    a.button("Power Saver", QUIET, c, (52, 332, 194, 34));
-    a.button("Balanced", BALANCED, c, (263, 332, 194, 34));
-    a.button("Performance", PERFORMANCE, c, (474, 332, 194, 34));
+    a.button("Office", REGULAR, c, (32, 136, 322, 92));
+    a.button("Balanced", PRESET_DAILY, c, (366, 136, 322, 92));
+    a.button("Performance", PRESET_HIGH, c, (32, 240, 322, 92));
+    a.button("Boost", PRESET_BOOST, c, (366, 240, 322, 92));
+    a.button("Automatic", AUTO, c, (56, 388, 120, 40));
+    a.button("Boost", BOOST, c, (176, 388, 120, 40));
+    a.button("Power Saver", QUIET, c, (320, 388, 115, 40));
+    a.button("Balanced", BALANCED, c, (435, 388, 114, 40));
+    a.button("Performance", PERFORMANCE, c, (549, 388, 115, 40));
     a.button("Apply", APPLY_LIGHT, l, (548, 149, 120, 32));
     a.button("Solid", EFFECT, l, (52, 215, 296, 34));
     a.button("High", BRIGHTNESS, l, (364, 215, 304, 34));
