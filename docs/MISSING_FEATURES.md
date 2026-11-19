@@ -10,7 +10,7 @@ Updated 10 October 2026 against v0.7.1. Code delivery and physical acceptance ar
 
 ## v0.6 delivery
 
-- Redesigned native UI: global Hide/Exit, grouped fan/power controls, compact presets, explicit lighting-send feedback, and full status/error Details. Three native page renders verified; owner acceptance pending.
+- Redesigned native UI: segmented page tabs, flicker-free double-buffered painting, close-to-tray with global Exit, grouped fan/power controls, compact presets, explicit lighting-send feedback, and full status/error Details. Three native page renders verified; owner acceptance pending.
 - Protected Program Files installer with file hashes, preference migration, desktop shortcut, Installed Apps uninstall, and startup rollback on installation failure.
 - Current administrator user's elevated interactive logon task; one-time installation approval, no stored password or repeated sign-in prompt. Starts on AC/battery and requests light-bar off after sign-in.
 - Startup controls use bounded helpers with task/real-registry verification. Portable startup remains monitor only. No continuous startup metadata polling.

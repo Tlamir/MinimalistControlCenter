@@ -24,9 +24,10 @@ use windows_sys::Win32::{
     UI::{
         Controls::{
             DRAWITEMSTRUCT, Dialogs::*, ODS_DISABLED, ODS_FOCUS, ODS_NOFOCUSRECT, ODS_SELECTED,
+            WM_MOUSELEAVE,
         },
         HiDpi::GetDpiForWindow,
-        Input::KeyboardAndMouse::EnableWindow,
+        Input::KeyboardAndMouse::{EnableWindow, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent},
         Shell::*,
         WindowsAndMessaging::*,
     },
@@ -55,7 +56,6 @@ const KEY: u16 = 111;
 const USB: u16 = 113;
 const BAR: u16 = 115;
 const QUIT: u16 = 120;
-const HIDE: u16 = 129;
 const DETAILS: u16 = 130;
 const SHOW: u16 = 131;
 const GPU_TEMP: u16 = 121;
@@ -88,12 +88,31 @@ const MINT: COLORREF = rgb(227, 243, 234);
 const BORDER: COLORREF = rgb(219, 227, 222);
 const WHITE: COLORREF = rgb(255, 255, 255);
 const ERROR: COLORREF = rgb(163, 53, 44);
+const TRACK: COLORREF = rgb(233, 238, 235);
+const TRACK_HOT: COLORREF = rgb(223, 230, 226);
+const HOVER: COLORREF = rgb(242, 247, 244);
+const BORDER_HOT: COLORREF = rgb(190, 204, 196);
+const GREEN_HOT: COLORREF = rgb(19, 96, 63);
+// Logical (96 DPI) client size and the shared status strip below every page.
+const WIDTH: i32 = 720;
+const HEIGHT: i32 = 652;
+const STATS_Y: i32 = 500;
+const STATS_H: i32 = 90;
+const FOOTER_Y: i32 = 604;
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 fn caption(hwnd: HWND, t: &str) {
-    // SAFETY: Live UI-owned handle and NUL-terminated text copied by Windows.
+    let mut current = [0u16; 160];
+    // SAFETY: Live UI-owned handle; bounded writable buffer and NUL-terminated text.
     unsafe {
+        let n = GetWindowTextW(hwnd, current.as_mut_ptr(), current.len() as i32);
+        // Unchanged captions skip the text update and the repaint it triggers.
+        if t.encode_utf16()
+            .eq(current[..n.max(0) as usize].iter().copied())
+        {
+            return;
+        }
         SetWindowTextW(hwnd, wide(t).as_ptr());
     }
 }
@@ -595,6 +614,7 @@ struct App {
     cpu_clock: String,
     gpu: Option<(mcc::gpu::Sensors, Instant)>,
     tray: NOTIFYICONDATAW,
+    tray_tip: RefCell<String>,
     benchmark: Option<Benchmark>,
     test_completed: bool,
     ticks: u64,
@@ -607,12 +627,55 @@ struct App {
     paint_us: u64,
     dashboard_us: u64,
 }
-thread_local! {static APP:RefCell<Option<App>>=const {RefCell::new(None)};}
+thread_local! {
+    static APP:RefCell<Option<App>>=const {RefCell::new(None)};
+    /// The button under the mouse, for hover feedback. Touched only on the UI thread.
+    static HOT:std::cell::Cell<HWND>=const {std::cell::Cell::new(ptr::null_mut())};
+}
+/// Button subclass that tracks hover. It never reads or borrows `APP`.
+unsafe extern "system" fn button_procedure(
+    hwnd: HWND,
+    msg: u32,
+    w: WPARAM,
+    l: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    match msg {
+        WM_MOUSEMOVE if HOT.get() != hwnd => {
+            let previous = HOT.replace(hwnd);
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            // SAFETY: Live UI-thread button handles; correctly sized tracking request.
+            unsafe {
+                TrackMouseEvent(&mut track);
+                if !previous.is_null() {
+                    InvalidateRect(previous, ptr::null(), 0);
+                }
+                InvalidateRect(hwnd, ptr::null(), 0);
+            }
+        }
+        WM_MOUSELEAVE if HOT.get() == hwnd => {
+            HOT.set(ptr::null_mut());
+            // SAFETY: Live UI-thread button handle.
+            unsafe {
+                InvalidateRect(hwnd, ptr::null(), 0);
+            }
+        }
+        _ => {}
+    }
+    // SAFETY: Forward every message unchanged to the button's original procedure.
+    unsafe { DefSubclassProc(hwnd, msg, w, l) }
+}
 impl App {
     /// Render only our own drawing and controls into a bitmap. No screen capture or hardware calls.
     fn render_preview(&self, path: &std::path::Path) -> Result<(), String> {
-        let width = self.px(720);
-        let height = self.px(708);
+        let width = self.px(WIDTH);
+        let height = self.px(HEIGHT);
         let mut info = BITMAPINFO::default();
         info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
         info.bmiHeader.biWidth = width;
@@ -797,6 +860,7 @@ impl App {
                 ptr::null(),
             );
             SendMessageW(h, WM_SETFONT, self.fonts[0] as usize, 0);
+            SetWindowSubclass(h, Some(button_procedure), 1, 0);
             h
         };
         self.buttons.push(Button { id, hwnd, page });
@@ -809,17 +873,20 @@ impl App {
     }
     fn refresh_controls(&self) {
         let mut tray = self.tray;
-        if tray.cbSize != 0 {
-            let tip = wide(&format!(
-                "Minimalist · {}",
-                mcc::session::fan_label(self.session.capabilities.as_ref().map(|c| c.fan_mode_raw))
-            ));
+        let text = format!(
+            "Minimalist · {}",
+            mcc::session::fan_label(self.session.capabilities.as_ref().map(|c| c.fan_mode_raw))
+        );
+        // Explorer is only notified when the tooltip text actually changes.
+        if tray.cbSize != 0 && *self.tray_tip.borrow() != text {
+            let tip = wide(&text);
             tray.szTip.fill(0);
             tray.szTip[..tip.len()].copy_from_slice(&tip);
             // SAFETY: Initialized tray data copied by Windows; fixed short tooltip.
             unsafe {
                 Shell_NotifyIconW(NIM_MODIFY, &tray);
             }
+            *self.tray_tip.borrow_mut() = text;
         }
         let c = self.session.capabilities.as_ref();
         caption(
@@ -889,30 +956,24 @@ impl App {
                 "Top → bottom",
             ][self.lighting.direction as usize - 1],
         );
-        let animated = matches!(
-            self.lighting.effect,
-            Effect::Breathing | Effect::Rainbow | Effect::Wave
-        );
+        let animated = self.animated();
+        // The light bar row follows the keyboard card, which shrinks without animation options.
+        // SAFETY: UI-owned child handle; position only, no size, z-order or activation change.
+        unsafe {
+            SetWindowPos(
+                self.handle(BAR),
+                ptr::null_mut(),
+                self.px(548),
+                self.px(self.light_bar_y() + 12),
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
         for b in &self.buttons {
             let visible = b.page.is_none_or(|p| p == self.page)
                 && (!matches!(b.id, SPEED | DIRECTION) || animated);
-            let enabled = match b.id {
-                CONNECT => !self.session.busy,
-                AUTO | APPLY_LIGHT | RESTORE => self.session.ready(),
-                BOOST => self.session.ready() && c.is_some_and(|c| c.boost),
-                KEY => self.session.ready() && c.is_some_and(|c| c.windows_key_lock),
-                USB => self.session.ready() && c.is_some_and(|c| c.usb_charging),
-                BAR => self.session.ready() && c.is_some_and(|c| c.light_bar),
-                QUIET | BALANCED | PERFORMANCE => !self.session.busy,
-                REGULAR | PRESET_DAILY | PRESET_HIGH | SAVE_CUSTOM => self.session.ready(),
-                PRESET_BOOST => self.session.ready() && c.is_some_and(|c| c.boost),
-                APPLY_CUSTOM => {
-                    self.session.ready()
-                        && self.settings.profiles.iter().any(|p| p.name == "Custom")
-                }
-                GPU_TEMP | STARTUP => !self.session.busy,
-                _ => true,
-            };
+            let enabled = self.enabled(b.id, self.session.busy);
             // SAFETY: UI-owned child handles on their owning thread.
             unsafe {
                 ShowWindow(b.hwnd, if visible { SW_SHOW } else { SW_HIDE });
@@ -921,6 +982,35 @@ impl App {
             }
         }
         self.invalidate();
+    }
+    /// Whether a control accepts input. `busy` is passed separately so drawing can show the
+    /// idle appearance during a short request instead of flashing every button gray.
+    fn enabled(&self, id: u16, busy: bool) -> bool {
+        let c = self.session.capabilities.as_ref();
+        let ready = self.session.allowed && !busy;
+        match id {
+            CONNECT => !busy,
+            AUTO | APPLY_LIGHT | RESTORE => ready,
+            BOOST => ready && c.is_some_and(|c| c.boost),
+            KEY => ready && c.is_some_and(|c| c.windows_key_lock),
+            USB => ready && c.is_some_and(|c| c.usb_charging),
+            BAR => ready && c.is_some_and(|c| c.light_bar),
+            QUIET | BALANCED | PERFORMANCE => !busy,
+            REGULAR | PRESET_DAILY | PRESET_HIGH | SAVE_CUSTOM => ready,
+            PRESET_BOOST => ready && c.is_some_and(|c| c.boost),
+            APPLY_CUSTOM => ready && self.settings.profiles.iter().any(|p| p.name == "Custom"),
+            GPU_TEMP | STARTUP => !busy,
+            _ => true,
+        }
+    }
+    fn animated(&self) -> bool {
+        matches!(
+            self.lighting.effect,
+            Effect::Breathing | Effect::Rainbow | Effect::Wave
+        )
+    }
+    fn light_bar_y(&self) -> i32 {
+        if self.animated() { 430 } else { 358 }
     }
     fn effect_index(&self) -> usize {
         match self.lighting.effect {
@@ -1163,7 +1253,7 @@ impl App {
         if self.stats != stats || self.cpu_clock != clock {
             self.stats = stats;
             self.cpu_clock = clock;
-            let r = self.rect(32, 555, 656, 96);
+            let r = self.rect(32, STATS_Y, 656, STATS_H);
             // SAFETY: Stack RECT copied by Windows; repaint only changed displayed values.
             unsafe {
                 InvalidateRect(self.hwnd, &r, 0);
@@ -1249,7 +1339,14 @@ impl App {
                     self.monitor.wake();
                     self.poll();
                 }
-                if id == SETTINGS && !self.demo && self.benchmark.is_none() && !self.session.busy {
+                // Startup state is read at launch and after each change; re-reading it through
+                // PowerShell on every visit blocked the controls for about half a second.
+                if id == SETTINGS
+                    && self.startup.is_none()
+                    && !self.demo
+                    && self.benchmark.is_none()
+                    && !self.session.busy
+                {
                     self.submit(Job::StartupStatus);
                 }
             }
@@ -1482,7 +1579,6 @@ impl App {
                     PostMessageW(self.hwnd, WM_CLOSE, 1, 0);
                 }
             }
-            HIDE => self.hide(),
             SHOW => self.show(),
             DETAILS => {
                 // SAFETY: Show the complete status as plain text in an owned native dialog.
@@ -1630,11 +1726,11 @@ impl App {
         }
     }
     fn paint(&self, dc: HDC) {
-        self.round(dc, self.rect(0, 0, 720, 708), BG, BG, 0);
+        self.round(dc, self.rect(0, 0, WIDTH, HEIGHT), BG, BG, 0);
         self.draw_text(
             dc,
             &self.model,
-            self.rect(32, 24, 656, 34),
+            self.rect(32, 24, 424, 34),
             2,
             INK,
             DT_SINGLELINE | DT_END_ELLIPSIS,
@@ -1643,62 +1739,58 @@ impl App {
             dc,
             &format!("Minimalist Control Center · {}", env!("CARGO_PKG_VERSION")),
             32,
-            71,
-            300,
-            24,
+            62,
+            424,
+            20,
             3,
             MUTED,
         );
+        // Segmented page switcher; the selected tab is drawn as a raised white segment.
+        self.round(dc, self.rect(32, 92, 656, 40), TRACK, TRACK, 12);
         match self.page {
             Page::Cooling => {
-                self.label(dc, "Quick presets", 32, 182, 400, 24, 1, INK);
-                self.round(dc, self.rect(32, 328, 656, 163), WHITE, BORDER, 16);
-                self.label(dc, "Fans", 52, 342, 400, 24, 1, INK);
-                self.label(dc, "Windows power", 52, 417, 616, 24, 1, INK);
+                self.label(dc, "Quick presets", 32, 150, 400, 24, 1, INK);
+                self.round(dc, self.rect(32, 258, 656, 156), WHITE, BORDER, 16);
+                self.label(dc, "Fans", 52, 270, 400, 24, 1, INK);
+                self.label(dc, "Windows power", 52, 342, 616, 24, 1, INK);
             }
             Page::Lighting => {
-                self.label(dc, "Lighting", 32, 169, 380, 34, 2, INK);
-
-                self.round(dc, self.rect(32, 238, 656, 263), WHITE, BORDER, 16);
-                self.label(dc, "Keyboard", 52, 252, 320, 30, 1, INK);
+                let bar = self.light_bar_y();
+                self.round(dc, self.rect(32, 148, 656, bar - 160), WHITE, BORDER, 16);
+                self.label(dc, "Keyboard", 52, 162, 120, 30, 1, INK);
                 self.label(
                     dc,
                     if self.last_lighting_sent.as_ref() == Some(&self.lighting) {
                         "Sent"
                     } else {
-                        "Pending"
+                        "Not sent yet"
                     },
-                    200,
-                    257,
+                    140,
+                    166,
                     280,
                     22,
                     3,
                     MUTED,
                 );
-                self.label(dc, "Effect", 52, 292, 280, 22, 3, MUTED);
-                self.label(dc, "Brightness", 364, 292, 280, 22, 3, MUTED);
-                self.label(dc, "Color", 52, 363, 280, 22, 3, MUTED);
-                if matches!(
-                    self.lighting.effect,
-                    Effect::Breathing | Effect::Rainbow | Effect::Wave
-                ) {
-                    self.label(dc, "Animation speed", 52, 436, 280, 22, 3, MUTED);
-                    self.label(dc, "Direction", 364, 436, 280, 22, 3, MUTED);
+                self.label(dc, "Effect", 52, 202, 280, 22, 3, MUTED);
+                self.label(dc, "Brightness", 364, 202, 280, 22, 3, MUTED);
+                self.label(dc, "Color", 52, 273, 280, 22, 3, MUTED);
+                if self.animated() {
+                    self.label(dc, "Animation speed", 52, 346, 280, 22, 3, MUTED);
+                    self.label(dc, "Direction", 364, 346, 280, 22, 3, MUTED);
                 }
-                self.round(dc, self.rect(32, 497, 656, 54), WHITE, BORDER, 14);
-                self.label(dc, "Light bar", 52, 505, 380, 24, 1, INK);
-                self.label(dc, "Off at sign-in", 52, 530, 460, 18, 3, MUTED);
+                self.round(dc, self.rect(32, bar, 656, 56), WHITE, BORDER, 16);
+                self.label(dc, "Light bar", 52, bar + 8, 380, 24, 1, INK);
+                self.label(dc, "Off at sign-in", 52, bar + 32, 460, 18, 3, MUTED);
             }
             Page::Settings => {
-                self.label(dc, "Settings", 32, 169, 380, 34, 2, INK);
-
-                self.round(dc, self.rect(32, 238, 656, 140), WHITE, BORDER, 16);
-                self.label(dc, "Lock Windows key", 52, 251, 460, 28, 1, INK);
-
-                self.label(dc, "USB charging in hibernation", 52, 316, 460, 28, 1, INK);
-                self.label(dc, "Supported USB port", 52, 343, 460, 25, 3, MUTED);
-                self.round(dc, self.rect(32, 390, 656, 87), WHITE, BORDER, 16);
-                self.label(dc, "Start with Windows", 52, 402, 420, 28, 1, INK);
+                self.round(dc, self.rect(32, 148, 656, 140), WHITE, BORDER, 16);
+                self.label(dc, "Lock Windows key", 52, 161, 460, 28, 1, INK);
+                self.label(dc, "Disables the Windows key", 52, 186, 460, 20, 3, MUTED);
+                self.label(dc, "USB charging in hibernation", 52, 226, 460, 28, 1, INK);
+                self.label(dc, "Supported USB port", 52, 253, 460, 20, 3, MUTED);
+                self.round(dc, self.rect(32, 300, 656, 87), WHITE, BORDER, 16);
+                self.label(dc, "Start with Windows", 52, 314, 420, 28, 1, INK);
                 self.label(
                     dc,
                     if self.startup.is_some_and(|s| s.managed) {
@@ -1707,79 +1799,57 @@ impl App {
                         "Install to enable startup controls"
                     },
                     52,
-                    441,
-                    616,
+                    341,
+                    460,
                     20,
                     3,
                     MUTED,
                 );
-                self.label(dc, "Windows tools", 32, 491, 656, 24, 1, INK);
+                self.label(dc, "Windows tools", 32, 401, 656, 24, 1, INK);
             }
         }
         self.paint_stats(dc);
         self.draw_text(
             dc,
             self.message.lines().next().unwrap_or(""),
-            self.rect(32, 663, 554, 28),
+            self.rect(32, FOOTER_Y, 554, 32),
             3,
             if self.error { ERROR } else { MUTED },
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
         );
     }
     fn paint_stats(&self, dc: HDC) {
-        self.round(dc, self.rect(32, 558, 656, 90), WHITE, BORDER, 14);
+        self.round(dc, self.rect(32, STATS_Y, 656, STATS_H), WHITE, BORDER, 16);
         let sample = self
             .gpu
             .as_ref()
             .filter(|(_, time)| time.elapsed() < Duration::from_secs(30))
             .map(|(s, _)| s);
-        let gpu_clock = sample
-            .and_then(|s| s.clock_mhz)
-            .map(|v| format!("{v} MHz"))
-            .unwrap_or("—".into());
-        let gpu_temp = sample
-            .and_then(|s| s.temperature_c)
-            .map(|v| format!("{v} °C · sample"))
-            .unwrap_or("On demand".into());
-        let gpu_fan = sample
-            .and_then(|s| s.fan_rpm)
-            .map(|v| format!("{v} RPM"))
-            .unwrap_or("—".into());
-        let values = [
-            &self.stats[0],
-            &gpu_clock,
-            &gpu_fan,
-            &self.stats[1],
-            &self.stats[2],
-        ];
-        let notes = [
-            self.cpu_clock.as_str(),
-            gpu_temp.as_str(),
-            if sample.is_some_and(|s| s.fan_rpm.is_some()) {
-                "Sample"
-            } else {
-                "Unavailable"
-            },
-            "",
-            "",
-        ];
-        for (i, name) in ["CPU", "GPU", "GPU fan", "Memory", "Battery"]
-            .iter()
-            .enumerate()
-        {
-            let x = 48 + i as i32 * 130;
-            if i != 1 {
-                self.label(dc, values[i], x, 568, 123, 26, 1, INK);
-            }
-            self.label(dc, notes[i], x, 595, 123, 20, 3, MUTED);
-            self.label(dc, name, x, 622, 123, 20, 3, MUTED);
+        let gpu_note = match sample.map(|s| (s.temperature_c, s.fan_rpm)) {
+            Some((Some(t), Some(f))) => format!("{t} °C · {f} RPM"),
+            Some((Some(t), None)) => format!("{t} °C"),
+            Some((None, Some(f))) => format!("{f} RPM"),
+            Some((None, None)) => "No sensors".into(),
+            None => "On demand".into(),
+        };
+        // The GPU value is the GPU_TEMP button itself, so the sample is read only on request.
+        let values = [self.stats[0].as_str(), &self.stats[1], &self.stats[2], ""];
+        let notes = [self.cpu_clock.as_str(), "", "", &gpu_note];
+        for (i, name) in ["CPU", "Memory", "Battery", "GPU"].iter().enumerate() {
+            let x = 48 + i as i32 * 164;
+            self.label(dc, values[i], x, STATS_Y + 10, 150, 26, 1, INK);
+            self.label(dc, notes[i], x, STATS_Y + 37, 150, 20, 3, MUTED);
+            self.label(dc, name, x, STATS_Y + 62, 150, 20, 3, MUTED);
         }
     }
     fn draw_button(&self, d: &DRAWITEMSTRUCT) {
         let id = d.CtlID as u16;
         let mut r = d.rcItem;
-        let disabled = d.itemState & ODS_DISABLED != 0;
+        // Input stays blocked while busy, but controls keep their idle look to avoid a gray flash.
+        let disabled =
+            d.itemState & ODS_DISABLED != 0 && !(self.session.busy && self.enabled(id, false));
         let pressed = d.itemState & ODS_SELECTED != 0;
+        let hot = !disabled && HOT.get() == d.hwndItem;
         let selected = match id {
             COOLING => self.page == Page::Cooling,
             LIGHTING => self.page == Page::Lighting,
@@ -1831,30 +1901,67 @@ impl App {
         let saved = unsafe { SaveDC(d.hDC) };
         let nav = matches!(id, COOLING | LIGHTING | SETTINGS);
         let primary = id == APPLY_LIGHT || id == CONNECT && !self.session.allowed;
-        let fill = if disabled {
-            BG
+        let (fill, edge) = if nav {
+            if selected {
+                (WHITE, BORDER)
+            } else if hot {
+                (TRACK_HOT, TRACK_HOT)
+            } else {
+                (TRACK, TRACK)
+            }
+        } else if disabled {
+            (BG, BORDER)
         } else if primary {
-            GREEN
-        } else if selected || pressed {
-            MINT
-        } else if nav {
-            BG
+            (if pressed || hot { GREEN_HOT } else { GREEN }, GREEN)
+        } else if selected {
+            (MINT, GREEN)
+        } else if pressed {
+            (MINT, BORDER)
+        } else if hot {
+            (HOVER, BORDER_HOT)
         } else {
+            (WHITE, BORDER)
+        };
+        // Fill behind the rounded corners with the surface the button sits on.
+        let surface = if nav {
+            TRACK
+        } else if matches!(
+            id,
+            AUTO | BOOST
+                | QUIET
+                | BALANCED
+                | PERFORMANCE
+                | APPLY_LIGHT
+                | EFFECT
+                | BRIGHTNESS
+                | SPEED
+                | DIRECTION
+                | COLOR
+                | BAR
+                | KEY
+                | USB
+                | STARTUP
+                | GPU_TEMP
+        ) || (SWATCH..=225).contains(&id)
+        {
             WHITE
-        };
-        let edge = if selected {
-            GREEN
-        } else if nav {
-            fill
         } else {
-            BORDER
+            BG
         };
-        self.round(d.hDC, r, fill, edge, 12);
+        // SAFETY: Valid item DC and RECT supplied by Windows; scoped brush deleted after use.
+        unsafe {
+            let brush = CreateSolidBrush(surface);
+            FillRect(d.hDC, &r, brush);
+            DeleteObject(brush);
+        }
+        self.round(d.hDC, r, fill, edge, if nav { 10 } else { 12 });
         let mut buffer = [0u16; 160];
         // SAFETY: Owned child handle and correctly sized writable character buffer.
         let n = unsafe { GetWindowTextW(d.hwndItem, buffer.as_mut_ptr(), buffer.len() as i32) };
         let s = String::from_utf16_lossy(&buffer[..n.max(0) as usize]);
-        let color = if disabled {
+        let color = if nav {
+            if selected { INK } else { MUTED }
+        } else if disabled {
             MUTED
         } else if primary {
             WHITE
@@ -1894,7 +2001,7 @@ impl App {
             title.bottom = title.top + self.px(25);
             self.draw_text(d.hDC, &s, title, 1, color, DT_CENTER | DT_SINGLELINE);
             let mut detail = r;
-            detail.top += self.px(39);
+            detail.top += self.px(36);
             self.draw_text(
                 d.hDC,
                 match id {
@@ -1918,13 +2025,7 @@ impl App {
                 d.hDC,
                 &s,
                 r,
-                if nav || primary {
-                    1
-                } else if id == HIDE || id == CUSTOM {
-                    3
-                } else {
-                    0
-                },
+                if nav || primary { 1 } else { 0 },
                 color,
                 (if choice { DT_LEFT } else { DT_CENTER }) | DT_VCENTER | DT_SINGLELINE,
             );
@@ -1933,7 +2034,7 @@ impl App {
                 arrow.left = arrow.right - self.px(32);
                 self.draw_text(
                     d.hDC,
-                    "⌄",
+                    "▾",
                     arrow,
                     0,
                     MUTED,
@@ -1967,6 +2068,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
         if msg == a.taskbar_created && msg != 0 {
             // SAFETY: Re-add our initialized tray icon after Explorer restarts.
             unsafe { Shell_NotifyIconW(NIM_ADD, &a.tray); }
+            a.tray_tip.borrow_mut().clear();
             a.refresh_controls();
             return true;
         }
@@ -1976,7 +2078,30 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             WM_PAINT=>{
                 a.paints += 1;
                 // SAFETY: Paired paint calls with initialized PAINTSTRUCT and live HWND.
-                unsafe{let mut p=PAINTSTRUCT::default();let dc=BeginPaint(hwnd,&mut p);let saved=SaveDC(dc);let begin=Instant::now();if p.rcPaint.top >= a.px(555) && p.rcPaint.bottom <= a.px(651) {a.paint_stats(dc);} else {a.paint(dc);} a.paint_us+=begin.elapsed().as_micros() as u64;RestoreDC(dc,saved);EndPaint(hwnd,&p);}true
+                unsafe{
+                    let mut p=PAINTSTRUCT::default();
+                    let dc=BeginPaint(hwnd,&mut p);
+                    let begin=Instant::now();
+                    let r=p.rcPaint;
+                    let (w,h)=(r.right-r.left,r.bottom-r.top);
+                    // Draw into an off-screen bitmap and copy once, so repaints never flicker.
+                    let mem=CreateCompatibleDC(dc);
+                    let bitmap=if mem.is_null()||w<=0||h<=0{ptr::null_mut()}else{CreateCompatibleBitmap(dc,w,h)};
+                    let (target,old)=if bitmap.is_null(){(dc,ptr::null_mut())}else{(mem,SelectObject(mem,bitmap))};
+                    let saved=SaveDC(target);
+                    if !bitmap.is_null(){SetViewportOrgEx(target,-r.left,-r.top,ptr::null_mut());}
+                    let stats_only=r.top>=a.px(STATS_Y)&&r.bottom<=a.px(STATS_Y+STATS_H);
+                    if stats_only{a.round(target,r,BG,BG,0);a.paint_stats(target);}else{a.paint(target);}
+                    RestoreDC(target,saved);
+                    if !bitmap.is_null(){
+                        BitBlt(dc,r.left,r.top,w,h,mem,0,0,SRCCOPY);
+                        SelectObject(mem,old);
+                        DeleteObject(bitmap);
+                    }
+                    if !mem.is_null(){DeleteDC(mem);}
+                    a.paint_us+=begin.elapsed().as_micros() as u64;
+                    EndPaint(hwnd,&p);
+                }true
             }
             WM_DRAWITEM if l!=0=>{
                 a.button_paints += 1;
@@ -2215,8 +2340,8 @@ pub fn run() {
         let mut r = RECT {
             left: 0,
             top: 0,
-            right: 720 * dpi / 96,
-            bottom: 708 * dpi / 96,
+            right: WIDTH * dpi / 96,
+            bottom: HEIGHT * dpi / 96,
         };
         AdjustWindowRectEx(
             &mut r,
@@ -2339,6 +2464,7 @@ pub fn run() {
         cpu_clock: String::new(),
         gpu: None,
         tray: NOTIFYICONDATAW::default(),
+        tray_tip: RefCell::new(String::new()),
         benchmark: mode.and_then(|(seconds, path, hidden, self_test)| {
             before.map(|before| Benchmark {
                 start: Instant::now(),
@@ -2365,30 +2491,29 @@ pub fn run() {
         dashboard_us: 0,
     };
     caption(hwnd, &format!("{} · Minimalist Control Center", a.model));
-    a.button("Enable controls", CONNECT, None, (340, 60, 164, 38));
-    a.button("Hide", HIDE, None, (516, 60, 92, 38));
-    a.button("Exit", QUIT, None, (620, 60, 68, 38));
-    a.button("Cooling", COOLING, None, (32, 112, 213, 38));
-    a.button("Lighting", LIGHTING, None, (253, 112, 213, 38));
-    a.button("Settings", SETTINGS, None, (474, 112, 214, 38));
+    a.button("Enable controls", CONNECT, None, (468, 28, 148, 36));
+    a.button("Exit", QUIT, None, (628, 28, 60, 36));
+    a.button("Cooling", COOLING, None, (36, 96, 216, 32));
+    a.button("Lighting", LIGHTING, None, (252, 96, 216, 32));
+    a.button("Settings", SETTINGS, None, (468, 96, 216, 32));
     let c = Some(Page::Cooling);
     let l = Some(Page::Lighting);
     let s = Some(Page::Settings);
-    a.button("Automatic", AUTO, c, (52, 372, 298, 32));
-    a.button("Boost", BOOST, c, (370, 372, 298, 32));
-    a.button("Power Saver", QUIET, c, (52, 446, 194, 32));
-    a.button("Balanced", BALANCED, c, (262, 446, 194, 32));
-    a.button("Performance", PERFORMANCE, c, (474, 446, 194, 32));
-    a.button("Office", REGULAR, c, (32, 216, 155, 70));
-    a.button("Balanced", PRESET_DAILY, c, (199, 216, 155, 70));
-    a.button("Performance", PRESET_HIGH, c, (366, 216, 155, 70));
-    a.button("Boost", PRESET_BOOST, c, (533, 216, 155, 70));
-    a.button("Save current", SAVE_CUSTOM, c, (256, 506, 208, 34));
-    a.button("Custom preset", APPLY_CUSTOM, c, (32, 506, 208, 34));
-    a.button("Fan support", CUSTOM, c, (480, 506, 208, 34));
-    a.button("Apply keyboard", APPLY_LIGHT, l, (496, 250, 172, 36));
-    a.button("Solid", EFFECT, l, (52, 317, 286, 34));
-    a.button("High", BRIGHTNESS, l, (364, 317, 304, 34));
+    a.button("Office", REGULAR, c, (32, 180, 155, 64));
+    a.button("Balanced", PRESET_DAILY, c, (199, 180, 155, 64));
+    a.button("Performance", PRESET_HIGH, c, (366, 180, 155, 64));
+    a.button("Boost", PRESET_BOOST, c, (533, 180, 155, 64));
+    a.button("Automatic", AUTO, c, (52, 298, 298, 32));
+    a.button("Boost", BOOST, c, (370, 298, 298, 32));
+    a.button("Power Saver", QUIET, c, (52, 370, 194, 32));
+    a.button("Balanced", BALANCED, c, (263, 370, 194, 32));
+    a.button("Performance", PERFORMANCE, c, (474, 370, 194, 32));
+    a.button("Apply custom", APPLY_CUSTOM, c, (32, 430, 208, 34));
+    a.button("Save as custom", SAVE_CUSTOM, c, (256, 430, 208, 34));
+    a.button("Fan support", CUSTOM, c, (480, 430, 208, 34));
+    a.button("Apply keyboard", APPLY_LIGHT, l, (496, 160, 172, 34));
+    a.button("Solid", EFFECT, l, (52, 227, 296, 34));
+    a.button("High", BRIGHTNESS, l, (364, 227, 304, 34));
     for (i, name) in ["Blue", "Purple", "Green", "Red", "Amber", "White"]
         .iter()
         .enumerate()
@@ -2397,21 +2522,21 @@ pub fn run() {
             name,
             SWATCH + i as u16,
             l,
-            (52 + i as i32 * 50, 388, 40, 36),
+            (52 + i as i32 * 50, 298, 40, 36),
         );
     }
-    a.button("Custom color…", COLOR, l, (364, 388, 304, 36));
-    a.button("Medium", SPEED, l, (52, 461, 286, 34));
-    a.button("Left → right", DIRECTION, l, (364, 461, 304, 34));
-    a.button("Unavailable", BAR, l, (548, 506, 120, 32));
-    a.button("Unavailable", KEY, s, (548, 261, 120, 34));
-    a.button("Unavailable", USB, s, (548, 326, 120, 34));
-    a.button("Off", STARTUP, s, (548, 405, 120, 34));
-    a.button("Turn screen off", SCREEN_OFF, s, (32, 515, 316, 34));
-    a.button("Graphics settings", GPU, s, (372, 515, 316, 34));
-    a.button("Read GPU", GPU_TEMP, None, (178, 565, 123, 30));
-    a.button("Use original controller", RESTORE, s, (466, 171, 222, 34));
-    a.button("Details", DETAILS, None, (596, 663, 92, 32));
+    a.button("Custom color…", COLOR, l, (364, 298, 304, 36));
+    a.button("Medium", SPEED, l, (52, 371, 296, 34));
+    a.button("Left → right", DIRECTION, l, (364, 371, 304, 34));
+    a.button("Unavailable", BAR, l, (548, 442, 120, 32));
+    a.button("Unavailable", KEY, s, (548, 166, 120, 34));
+    a.button("Unavailable", USB, s, (548, 231, 120, 34));
+    a.button("Off", STARTUP, s, (548, 326, 120, 34));
+    a.button("Turn screen off", SCREEN_OFF, s, (32, 429, 208, 34));
+    a.button("Graphics settings", GPU, s, (256, 429, 208, 34));
+    a.button("Use original controller", RESTORE, s, (480, 429, 208, 34));
+    a.button("Read GPU", GPU_TEMP, None, (540, STATS_Y + 8, 132, 30));
+    a.button("Details", DETAILS, None, (596, FOOTER_Y, 92, 32));
     if demo {
         a.session.complete(Some((demo_caps(), true)), false);
         a.message = "Preview only · all hardware actions are simulated.".into();
