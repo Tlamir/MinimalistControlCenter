@@ -27,7 +27,7 @@ Same Monster Tulpar T5 V17.1 / N.1.06, i7-8750H, GTX 1060, 16 GB RAM, 12 logical
 
 ## Repeat
 
-Use the same power source, plan and comparable pages for both apps. Let each settle before measuring. Include the original GUI, tray and launcher service. For Minimalist's open Cooling page, include its existing `mcc.exe hardware observe-loop` child with `-ExternalProcessIds`.
+Use the same power source, plan and comparable pages for both apps. Let each settle before measuring. Include the original GUI, tray and launcher service. For Minimalist's open Cooling page, include its existing `mcc.exe hardware agent` child with `-ExternalProcessIds`.
 
 ```powershell
 .\scripts\measure-app.ps1 -ProcessIds @(GUI_PID) -ExternalProcessIds @(HELPER_PID) -Label visible -Seconds 30 -WindowHandle WINDOW_HANDLE -Output reports/local/visible.json

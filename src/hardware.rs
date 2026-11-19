@@ -19,20 +19,15 @@ struct Instance {
     #[serde(rename = "InstanceName")]
     name: String,
 }
-#[derive(Serialize)]
-struct Input {
-    #[serde(rename = "Data")]
-    data: u64,
-}
-#[derive(Deserialize)]
-struct Output {
-    #[serde(rename = "Return")]
-    value: u32,
-}
-
 struct NativeEc {
     wmi: WMIConnection,
     path: String,
+    /// Input signature of GetSetULong, fetched once. Re-reading the class definition on every
+    /// transaction added a WMI round trip to each EC byte.
+    input: wmi::IWbemClassWrapper,
+    /// Firmware feature-flag bytes (SUPPORT1, SUPPORT2, BOOST2). They are fixed by the BIOS, so
+    /// one plausible read per connection is reused; each EC read costs about 135 ms.
+    support: [Option<u8>; 3],
 }
 impl NativeEc {
     fn connect() -> Result<Self, String> {
@@ -60,17 +55,33 @@ impl NativeEc {
         if rows.next().is_some() {
             return Err("Ambiguous ACPI instance; refusing access".into());
         }
+        let input = wmi
+            .get_object("AcpiTest_MULong")
+            .and_then(|class| class.get_method("GetSetULong"))
+            .map_err(|e| format!("Cannot read firmware method: {e}"))?
+            .ok_or("Reviewed firmware method has no input signature")?;
         Ok(Self {
             wmi,
             path: row.path,
+            input,
+            support: [None; 3],
         })
     }
     fn transact(&self, data: u64) -> Result<u32, String> {
-        let result: Output = self
+        let fail = |e: wmi::WMIError| format!("EC transaction failed: {e}");
+        // A fresh parameter instance per call; only the signature lookup is cached.
+        let params = self.input.spawn_instance().map_err(fail)?;
+        params.put_property("Data", data).map_err(fail)?;
+        let output = self
             .wmi
-            .exec_instance_method::<Instance, Output>(&self.path, "GetSetULong", Input { data })
-            .map_err(|e| format!("EC transaction failed: {e}"))?;
-        Ok(result.value)
+            .exec_method(&self.path, "GetSetULong", Some(&params))
+            .map_err(fail)?
+            .ok_or("EC transaction returned no result")?;
+        match output.get_property("Return").map_err(fail)? {
+            wmi::Variant::UI4(v) => Ok(v),
+            wmi::Variant::I4(v) => u32::try_from(v).map_err(|_| "EC result out of range".into()),
+            other => Err(format!("Unexpected EC result type: {other:?}")),
+        }
     }
 }
 impl Ec for NativeEc {
@@ -87,7 +98,18 @@ impl Ec for NativeEc {
         ) {
             return Err("EC read is outside the allowlist".into());
         }
-        control::decode_ec_byte(self.transact(control::read_payload(address))?)
+        let slot = [control::SUPPORT1, control::SUPPORT2, control::BOOST2]
+            .iter()
+            .position(|a| *a == address);
+        if let Some(cached) = slot.and_then(|i| self.support[i]) {
+            return Ok(cached);
+        }
+        let value = control::decode_ec_byte(self.transact(control::read_payload(address))?)?;
+        // 255 means an unreadable EC; never cache it, so the plausibility check sees it again.
+        if let (Some(i), true) = (slot, value != 255) {
+            self.support[i] = Some(value);
+        }
+        Ok(value)
     }
     fn write(&mut self, address: u16, value: u8) -> Result<(), String> {
         if !(address == control::MODE && matches!(value, 0 | 64) || address == control::TRIGGER) {
@@ -136,59 +158,174 @@ impl Drop for Ownership {
 }
 
 #[derive(Deserialize)]
-#[serde(rename = "Win32_Process")]
-struct Process {
-    #[serde(rename = "Name")]
-    name: String,
-}
-#[derive(Deserialize)]
 #[serde(rename = "Win32_Service")]
 struct Service {
-    #[serde(rename = "Name")]
-    name: String,
-    #[serde(rename = "State")]
-    state: String,
     #[serde(rename = "PathName")]
     path: Option<String>,
 }
 
+/// Refuse writes while the OEM controller runs. Native process/service enumeration replaces
+/// the previous WMI queries (about 0.7 s per request) with the same matching rules.
 fn check_competing_controller() -> Result<(), String> {
-    let c = WMIConnection::with_namespace_path("root\\CIMV2")
-        .map_err(|e| format!("Cannot check OEM ownership: {e}"))?;
-    check_competing_with(&c)
+    competing(&running_processes()?, &running_services()?)
 }
-fn check_competing_with(c: &WMIConnection) -> Result<(), String> {
-    let processes: Vec<Process> = c
-        .raw_query("SELECT Name FROM Win32_Process WHERE Name='GamingCenter.exe' OR Name='OEMServiceWinApp.exe' OR Name='ControlCenter.exe' OR Name='GamingCenterU.exe'")
-        .map_err(|e| format!("Cannot check running controllers: {e}"))?;
-    for p in processes {
+pub(crate) fn competing(processes: &[String], services: &[(String, String)]) -> Result<(), String> {
+    for name in processes {
         if matches!(
-            p.name.to_ascii_lowercase().as_str(),
+            name.to_ascii_lowercase().as_str(),
             "gamingcenter.exe" | "oemservicewinapp.exe" | "controlcenter.exe" | "gamingcenteru.exe"
         ) {
             return Err(format!(
-                "Close {} before applying controls; two controllers can overwrite each other",
-                p.name
+                "Close {name} before applying controls; two controllers can overwrite each other"
             ));
         }
     }
-    let services: Vec<Service> = c
-        .raw_query("SELECT Name, State, PathName FROM Win32_Service WHERE State='Running'")
-        .map_err(|e| format!("Cannot check OEM services: {e}"))?;
-    for s in services {
-        let path = s.path.unwrap_or_default().to_ascii_lowercase();
-        if s.state == "Running"
-            && (path.contains("gamingcenter")
-                || path.contains("oemservice")
-                || path.contains("monster kontrol merkezi"))
+    for (name, path) in services {
+        let path = path.to_ascii_lowercase();
+        if path.contains("gamingcenter")
+            || path.contains("oemservice")
+            || path.contains("monster kontrol merkezi")
         {
             return Err(format!(
-                "OEM service {} is running. Hardware writes refused until ownership is resolved",
-                s.name
+                "OEM service {name} is running. Hardware writes refused until ownership is resolved"
             ));
         }
     }
     Ok(())
+}
+fn utf16_until_nul(s: &[u16]) -> String {
+    String::from_utf16_lossy(&s[..s.iter().position(|c| *c == 0).unwrap_or(s.len())])
+}
+/// Executable names of all running processes.
+fn running_processes() -> Result<Vec<String>, String> {
+    use windows_sys::Win32::{
+        Foundation::INVALID_HANDLE_VALUE,
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+    // SAFETY: Snapshot handle is checked, iterated with a correctly sized entry, closed once.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err("Cannot check running controllers".into());
+        }
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut names = Vec::new();
+        let mut more = Process32FirstW(snapshot, &mut entry) != 0;
+        while more {
+            names.push(utf16_until_nul(&entry.szExeFile));
+            more = Process32NextW(snapshot, &mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+        if names.is_empty() {
+            return Err("Cannot check running controllers".into());
+        }
+        Ok(names)
+    }
+}
+/// (name, binary path) of every running Win32 service. A service whose configuration
+/// cannot be read reports an empty path, matching the previous WMI behaviour.
+fn running_services() -> Result<Vec<(String, String)>, String> {
+    use windows_sys::Win32::System::Services::{
+        CloseServiceHandle, ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW, OpenSCManagerW,
+        OpenServiceW, QUERY_SERVICE_CONFIGW, QueryServiceConfigW, SC_ENUM_PROCESS_INFO,
+        SC_MANAGER_ENUMERATE_SERVICE, SERVICE_ACTIVE, SERVICE_QUERY_CONFIG, SERVICE_RUNNING,
+        SERVICE_WIN32,
+    };
+    // SAFETY: SCM handles are checked and closed once. Buffers are u64-aligned, sized from the
+    // API's reported requirement, and outlive every pointer read out of them.
+    unsafe {
+        let scm = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_ENUMERATE_SERVICE);
+        if scm.is_null() {
+            return Err("Cannot check OEM services".into());
+        }
+        let mut buffer: Vec<u64> = vec![0; 8192];
+        let mut count = 0u32;
+        let mut ok = false;
+        for _ in 0..4 {
+            let (mut needed, mut resume) = (0u32, 0u32);
+            ok = EnumServicesStatusExW(
+                scm,
+                SC_ENUM_PROCESS_INFO,
+                SERVICE_WIN32,
+                SERVICE_ACTIVE,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * 8) as u32,
+                &mut needed,
+                &mut count,
+                &mut resume,
+                ptr::null(),
+            ) != 0;
+            if ok || needed == 0 {
+                break;
+            }
+            // Services can start between calls; grow with headroom and retry from the start.
+            buffer = vec![0; (needed as usize + 4096) / 8 + 1];
+        }
+        if !ok {
+            CloseServiceHandle(scm);
+            return Err("Cannot check OEM services".into());
+        }
+        let entries = std::slice::from_raw_parts(
+            buffer.as_ptr().cast::<ENUM_SERVICE_STATUS_PROCESSW>(),
+            count as usize,
+        );
+        let mut services = Vec::new();
+        let mut config: Vec<u64> = vec![0; 1024];
+        for e in entries {
+            if e.ServiceStatusProcess.dwCurrentState != SERVICE_RUNNING {
+                continue;
+            }
+            let mut name_len = 0;
+            while *e.lpServiceName.add(name_len) != 0 {
+                name_len += 1;
+            }
+            let name =
+                String::from_utf16_lossy(std::slice::from_raw_parts(e.lpServiceName, name_len));
+            let mut path = String::new();
+            let service = OpenServiceW(scm, e.lpServiceName, SERVICE_QUERY_CONFIG);
+            if !service.is_null() {
+                let mut needed = 0u32;
+                let mut read = QueryServiceConfigW(
+                    service,
+                    config.as_mut_ptr().cast(),
+                    (config.len() * 8) as u32,
+                    &mut needed,
+                ) != 0;
+                if !read && needed as usize > config.len() * 8 {
+                    config = vec![0; needed as usize / 8 + 1];
+                    read = QueryServiceConfigW(
+                        service,
+                        config.as_mut_ptr().cast(),
+                        (config.len() * 8) as u32,
+                        &mut needed,
+                    ) != 0;
+                }
+                if read {
+                    let c = &*config.as_ptr().cast::<QUERY_SERVICE_CONFIGW>();
+                    if !c.lpBinaryPathName.is_null() {
+                        let mut n = 0;
+                        while *c.lpBinaryPathName.add(n) != 0 {
+                            n += 1;
+                        }
+                        path = String::from_utf16_lossy(std::slice::from_raw_parts(
+                            c.lpBinaryPathName,
+                            n,
+                        ));
+                    }
+                }
+                CloseServiceHandle(service);
+            }
+            services.push((name, path));
+        }
+        CloseServiceHandle(scm);
+        Ok(services)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -207,8 +344,43 @@ pub struct Observation {
 }
 pub fn observe() -> Result<Observation, String> {
     let _guard = Ownership::acquire()?;
-    let mut ec = NativeEc::connect()?;
-    let mode = control::observed_mode(&mut ec)?;
+    observe_with(&mut NativeEc::connect()?)
+}
+
+/// Persistent hardware agent: one warm firmware connection serving typed requests.
+/// Ownership and write permission are re-checked on every request and never cached.
+pub fn agent() -> Result<(), String> {
+    use crate::agent::{Request, Response};
+    let mut ec: Option<NativeEc> = None;
+    crate::agent::serve(
+        std::io::stdin().lock(),
+        std::io::stdout().lock(),
+        |request| {
+            if ec.is_none() {
+                ec = Some(NativeEc::connect()?);
+            }
+            let ec = ec.as_mut().ok_or("Firmware connection unavailable")?;
+            // Hold the mutex only for this request; release it before waiting for the next one.
+            let _guard = Ownership::acquire()?;
+            Ok(match request {
+                Request::Observe => Response::Observation(observe_with(ec)?),
+                Request::Status => Response::Status(status_with(ec)?),
+                Request::Fan(mode) => {
+                    check_competing_controller()?;
+                    control::set_fan(ec, mode)?;
+                    Response::Done
+                }
+                Request::Switch(s, on) => {
+                    check_competing_controller()?;
+                    control::set_switch(ec, s, on)?;
+                    Response::Done
+                }
+            })
+        },
+    )
+}
+fn observe_with(ec: &mut NativeEc) -> Result<Observation, String> {
+    let mode = control::observed_mode(ec)?;
     let ownership_reason = check_competing_controller().err();
     Ok(Observation {
         mode,
@@ -216,47 +388,19 @@ pub fn observe() -> Result<Observation, String> {
         ownership_reason,
     })
 }
-
-/// Persistent read-only helper: reuse connections, never cache ownership or write permission.
-pub fn observe_loop() -> Result<(), String> {
-    struct Reader {
-        ec: NativeEc,
-        inventory: WMIConnection,
-    }
-    let mut reader: Option<Reader> = None;
-    crate::observer::serve(std::io::stdin().lock(), std::io::stdout().lock(), || {
-        if reader.is_none() {
-            reader = Some(Reader {
-                ec: NativeEc::connect()?,
-                inventory: WMIConnection::with_namespace_path("root\\CIMV2")
-                    .map_err(|e| format!("Cannot check OEM ownership: {e}"))?,
-            });
-        }
-        let reader = reader
-            .as_mut()
-            .ok_or("Observation connection unavailable")?;
-        // Hold the same mutex only for this read; release it before waiting for another request.
-        let _guard = Ownership::acquire()?;
-        let mode = control::observed_mode(&mut reader.ec)?;
-        let ownership_reason = check_competing_with(&reader.inventory).err();
-        Ok(Observation {
-            mode,
-            writes_allowed: ownership_reason.is_none(),
-            ownership_reason,
-        })
-    })
-}
-
-pub fn status() -> Result<HardwareStatus, String> {
-    let _guard = Ownership::acquire()?;
-    let mut ec = NativeEc::connect()?;
-    let capabilities = control::capabilities(&mut ec)?;
+fn status_with(ec: &mut NativeEc) -> Result<HardwareStatus, String> {
+    let capabilities = control::capabilities(ec)?;
     let ownership_reason = check_competing_controller().err();
     Ok(HardwareStatus {
         writes_allowed: ownership_reason.is_none(),
         capabilities,
         ownership_reason,
     })
+}
+
+pub fn status() -> Result<HardwareStatus, String> {
+    let _guard = Ownership::acquire()?;
+    status_with(&mut NativeEc::connect()?)
 }
 /// Diagnostic raw candidates, NOT validated Celsius, RPM, percentages, or permission to write.
 pub fn calibration_probe() -> Result<serde_json::Value, String> {
@@ -372,4 +516,53 @@ pub fn handover(start_oem: bool) -> Result<(), String> {
         return Ok(());
     }
     crate::oem::change(start_oem)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+    #[test]
+    fn oem_processes_and_services_block_writes_case_insensitively() {
+        assert!(competing(&names(&["explorer.exe", "svchost.exe"]), &[]).is_ok());
+        for p in [
+            "GamingCenter.exe",
+            "OEMSERVICEWINAPP.EXE",
+            "controlcenter.exe",
+            "GamingCenterU.exe",
+        ] {
+            assert!(competing(&names(&[p]), &[]).unwrap_err().contains(p));
+        }
+        for path in [
+            r#""C:\Program Files\OEM\Monster Kontrol Merkezi\LaunchServGM.exe""#,
+            r"C:\Tools\GamingCenter\svc.exe",
+            r"C:\Windows\OEMService.exe -k",
+        ] {
+            let services = [("GamingCenter".to_string(), path.to_string())];
+            assert!(
+                competing(&[], &services)
+                    .unwrap_err()
+                    .starts_with("OEM service GamingCenter")
+            );
+        }
+        let unrelated = [("Spooler".to_string(), String::new())];
+        assert!(competing(&[], &unrelated).is_ok());
+    }
+    #[test]
+    fn native_inventory_reads_without_wmi_or_administrator_rights() {
+        let processes = running_processes().unwrap();
+        let own = std::env::current_exe().unwrap();
+        let own = own
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        assert!(processes.iter().any(|p| p.to_ascii_lowercase() == own));
+        let services = running_services().unwrap();
+        assert!(services.iter().any(|(name, path)| {
+            name.eq_ignore_ascii_case("EventLog") && path.to_ascii_lowercase().contains("svchost")
+        }));
+    }
 }

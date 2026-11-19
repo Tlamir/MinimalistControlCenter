@@ -93,6 +93,9 @@ const TRACK_HOT: COLORREF = rgb(223, 230, 226);
 const HOVER: COLORREF = rgb(242, 247, 244);
 const BORDER_HOT: COLORREF = rgb(190, 204, 196);
 const GREEN_HOT: COLORREF = rgb(19, 96, 63);
+const SWITCH_OFF: COLORREF = rgb(196, 205, 200);
+const SWITCH_OFF_HOT: COLORREF = rgb(176, 187, 181);
+const AMBER: COLORREF = rgb(190, 120, 20);
 // Logical (96 DPI) client size and the shared status strip below every page.
 const WIDTH: i32 = 720;
 const HEIGHT: i32 = 652;
@@ -197,36 +200,50 @@ fn call_with_timeout(args: &[String], timeout: u64) -> Result<serde_json::Value,
     }
     Ok(v)
 }
-fn hardware_status() -> Result<mcc::hardware::HardwareStatus, String> {
-    serde_json::from_value(call(&["hardware".into(), "status".into()])?["status"].clone())
-        .map_err(|e| e.to_string())
-}
-fn boot_hardware_status() -> Result<mcc::hardware::HardwareStatus, String> {
-    serde_json::from_value(
-        call_with_timeout(&["hardware".into(), "status".into()], 20)?["status"].clone(),
-    )
-    .map_err(|e| e.to_string())
-}
-fn fan_args(f: FanMode) -> Vec<String> {
-    vec![
-        "hardware".into(),
-        if f == FanMode::Auto {
-            "fan-auto"
-        } else {
-            "fan-boost"
+/// The worker's persistent hardware agent. Any failed or timed-out request drops it, so the
+/// next request starts a fresh helper; a request is never resent.
+struct Hardware(Option<mcc::agent::Agent>);
+impl Hardware {
+    fn request(
+        &mut self,
+        request: mcc::agent::Request,
+        timeout: u64,
+    ) -> Result<mcc::agent::Response, String> {
+        if self.0.is_none() {
+            let path = std::env::current_exe()
+                .map_err(|e| e.to_string())?
+                .with_file_name("mcc.exe");
+            self.0 = Some(
+                mcc::agent::Agent::start(&path)
+                    .map_err(|e| format!("Hardware helper could not start: {e:?}"))?,
+            );
         }
-        .into(),
-    ]
+        let agent = self.0.as_mut().ok_or("Hardware helper unavailable")?;
+        let result = agent.request(request, Duration::from_secs(timeout));
+        if result.is_err() {
+            self.0 = None;
+        }
+        result
+    }
+    fn status(&mut self, timeout: u64) -> Result<mcc::hardware::HardwareStatus, String> {
+        match self.request(mcc::agent::Request::Status, timeout)? {
+            mcc::agent::Response::Status(s) => Ok(s),
+            _ => Err("Invalid status reply".into()),
+        }
+    }
+    fn write(&mut self, request: mcc::agent::Request, timeout: u64) -> Result<(), String> {
+        self.request(request, timeout).map(|_| ())
+    }
+    fn fan(&mut self, mode: FanMode) -> Result<(), String> {
+        self.write(mcc::agent::Request::Fan(mode), 5)
+    }
 }
-fn operation(job: &Job) -> Result<Completed, String> {
+fn operation(job: &Job, hw: &RefCell<Hardware>) -> Result<Completed, String> {
+    use mcc::agent::Request;
     let message = match job {
         Job::Connect | Job::StartupConnect => {
             let startup = matches!(job, Job::StartupConnect);
-            let s = if startup {
-                boot_hardware_status()?
-            } else {
-                hardware_status()?
-            };
+            let s = hw.borrow_mut().status(if startup { 20 } else { 5 })?;
             if !s.writes_allowed
                 && s.ownership_reason
                     .as_deref()
@@ -240,7 +257,8 @@ fn operation(job: &Job) -> Result<Completed, String> {
             if startup {
                 // Fresh desired-state command checks pending pulses and readback before writing.
                 // Boot recovery must never replay a toggle or apply a fan/keyboard profile.
-                call_with_timeout(&["hardware".into(), "light-bar-off".into()], 20)?;
+                hw.borrow_mut()
+                    .write(Request::Switch(Switch::LightBar, false), 20)?;
                 "Connected · light bar off."
             } else {
                 "Connected."
@@ -275,7 +293,7 @@ fn operation(job: &Job) -> Result<Completed, String> {
             mcc::presets::apply_combination(
                 Some(*mode),
                 None,
-                |f| call(&fan_args(f)).map(|_| ()),
+                |f| hw.borrow_mut().fan(f),
                 mcc::desktop::power,
             )?;
             "Fan mode updated."
@@ -284,7 +302,7 @@ fn operation(job: &Job) -> Result<Completed, String> {
             mcc::presets::apply_combination(
                 None,
                 Some(*plan),
-                |f| call(&fan_args(f)).map(|_| ()),
+                |f| hw.borrow_mut().fan(f),
                 mcc::desktop::power,
             )?;
             "Power plan updated."
@@ -293,13 +311,13 @@ fn operation(job: &Job) -> Result<Completed, String> {
             mcc::presets::apply_combination(
                 Some(*fan),
                 Some(*power),
-                |f| call(&fan_args(f)).map(|_| ()),
+                |f| hw.borrow_mut().fan(f),
                 mcc::desktop::power,
             )?;
             "Custom preset applied."
         }
         Job::Preset(p) => {
-            mcc::presets::apply(*p, |f| call(&fan_args(f)).map(|_| ()), mcc::desktop::power)?;
+            mcc::presets::apply(*p, |f| hw.borrow_mut().fan(f), mcc::desktop::power)?;
             match p {
                 Preset::Office => "Office preset applied.",
                 Preset::Balanced => "Balanced preset applied.",
@@ -308,15 +326,7 @@ fn operation(job: &Job) -> Result<Completed, String> {
             }
         }
         Job::Switch(s, on) => {
-            let name = match (s, on) {
-                (Switch::WindowsKeyLock, true) => "key-lock-on",
-                (Switch::WindowsKeyLock, false) => "key-lock-off",
-                (Switch::UsbCharging, true) => "usb-on",
-                (Switch::UsbCharging, false) => "usb-off",
-                (Switch::LightBar, true) => "light-bar-on",
-                (Switch::LightBar, false) => "light-bar-off",
-            };
-            call(&["hardware".into(), name.into()])?;
+            hw.borrow_mut().write(Request::Switch(*s, *on), 5)?;
             match s {
                 Switch::LightBar => {
                     if *on {
@@ -371,7 +381,7 @@ fn operation(job: &Job) -> Result<Completed, String> {
             return Ok(r);
         }
         Job::Restore => {
-            call(&fan_args(FanMode::Auto))?;
+            hw.borrow_mut().fan(FanMode::Auto)?;
             call(&["hardware".into(), "resume-oem".into()])?;
             "Automatic cooling restored. The original controller can now be opened."
         }
@@ -382,31 +392,15 @@ fn operation(job: &Job) -> Result<Completed, String> {
     };
     Ok(Completed::message(message))
 }
-fn worker(job: Job, observer: &mut Option<mcc::observer::Observer>) -> Completed {
+fn worker(job: Job, hw: &RefCell<Hardware>) -> Completed {
     let startup = matches!(job, Job::StartupConnect);
     let mut r = worker_with(
         job,
         |job| {
             if matches!(job, Job::Poll) {
-                if observer.is_none() {
-                    let path = std::env::current_exe()
-                        .map_err(|e| e.to_string())?
-                        .with_file_name("mcc.exe");
-                    *observer = Some(
-                        mcc::observer::Observer::start(&path)
-                            .map_err(|e| format!("Observation reader stopped: {e:?}"))?,
-                    );
-                }
-                let result = observer
-                    .as_mut()
-                    .ok_or("Observation reader unavailable")?
-                    .read(Duration::from_secs(5));
-                let observation = match result {
-                    Ok(o) => o,
-                    Err(e) => {
-                        *observer = None;
-                        return Err(e);
-                    }
+                let observation = match hw.borrow_mut().request(mcc::agent::Request::Observe, 5)? {
+                    mcc::agent::Response::Observation(o) => o,
+                    _ => return Err("Invalid observation reply".into()),
                 };
                 let mut r = Completed::message("Fan state synchronized.");
                 if !observation.writes_allowed {
@@ -419,16 +413,10 @@ fn worker(job: Job, observer: &mut Option<mcc::observer::Observer>) -> Completed
                 r.observation = Some(observation);
                 Ok(r)
             } else {
-                operation(job)
+                operation(job, hw)
             }
         },
-        || {
-            if startup {
-                boot_hardware_status()
-            } else {
-                hardware_status()
-            }
-        },
+        || hw.borrow_mut().status(if startup { 20 } else { 5 }),
     );
     r.power = mcc::desktop::active_power();
     r.power_refreshed = true;
@@ -589,7 +577,7 @@ struct Benchmark {
 struct App {
     hwnd: HWND,
     taskbar_created: u32,
-    fonts: [HFONT; 4],
+    fonts: [HFONT; 5],
     dpi: i32,
     buttons: Vec<Button>,
     page: Page,
@@ -612,7 +600,11 @@ struct App {
     previous_cpu: Option<mcc::CpuTimes>,
     stats: [String; 3],
     cpu_clock: String,
+    levels: [Option<u8>; 3],
+    battery_note: String,
     gpu: Option<(mcc::gpu::Sensors, Instant)>,
+    /// Control clicked for the request in flight; drawn as its target state until it completes.
+    pending: Option<u16>,
     tray: NOTIFYICONDATAW,
     tray_tip: RefCell<String>,
     benchmark: Option<Benchmark>,
@@ -781,15 +773,14 @@ impl App {
     }
     fn check_pages(&mut self) -> bool {
         let faces = self.font_faces();
-        let mut passed = faces.len() == 4 && faces.iter().all(|s| s.starts_with("Segoe UI"));
+        let mut passed = faces.len() == 5 && faces.iter().all(|s| s.starts_with("Segoe UI"));
         let previous = self.lighting.effect;
         self.lighting.effect = Effect::Solid;
         for page in [Page::Cooling, Page::Lighting, Page::Settings] {
             self.page = page;
             self.refresh_controls();
             for b in &self.buttons {
-                let expected =
-                    b.page.is_none_or(|p| p == page) && !matches!(b.id, SPEED | DIRECTION);
+                let expected = b.page.is_none_or(|p| p == page);
                 // SAFETY: Query only UI-owned control styles; root is hidden during this self-test.
                 let style = unsafe { GetWindowLongW(b.hwnd, GWL_STYLE) } as u32;
                 passed &= (style & WS_VISIBLE != 0) == expected;
@@ -811,13 +802,16 @@ impl App {
                 }
             }
         }
+        // Animation options stay visible but only accept input for animated effects.
         self.page = Page::Lighting;
-        self.lighting.effect = Effect::Wave;
-        self.refresh_controls();
-        for id in [SPEED, DIRECTION] {
-            // SAFETY: Query style of this UI's existing control.
-            passed &=
-                unsafe { GetWindowLongW(self.handle(id), GWL_STYLE) } as u32 & WS_VISIBLE != 0;
+        for (effect, enabled) in [(Effect::Solid, false), (Effect::Wave, true)] {
+            self.lighting.effect = effect;
+            self.refresh_controls();
+            for id in [SPEED, DIRECTION] {
+                // SAFETY: Query style of this UI's existing control.
+                let style = unsafe { GetWindowLongW(self.handle(id), GWL_STYLE) } as u32;
+                passed &= (style & WS_DISABLED == 0) == enabled && style & WS_VISIBLE != 0;
+            }
         }
         self.lighting.effect = previous;
         self.page = Page::Cooling;
@@ -909,12 +903,7 @@ impl App {
         );
         caption(
             self.handle(GPU_TEMP),
-            &self
-                .gpu
-                .as_ref()
-                .and_then(|(s, _)| s.clock_mhz)
-                .map(|v| format!("{v} MHz"))
-                .unwrap_or("Read GPU".into()),
+            if self.gpu.is_some() { "Update" } else { "Read" },
         );
         for (id, s) in [
             (KEY, Switch::WindowsKeyLock),
@@ -956,23 +945,8 @@ impl App {
                 "Top → bottom",
             ][self.lighting.direction as usize - 1],
         );
-        let animated = self.animated();
-        // The light bar row follows the keyboard card, which shrinks without animation options.
-        // SAFETY: UI-owned child handle; position only, no size, z-order or activation change.
-        unsafe {
-            SetWindowPos(
-                self.handle(BAR),
-                ptr::null_mut(),
-                self.px(548),
-                self.px(self.light_bar_y() + 12),
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
         for b in &self.buttons {
-            let visible = b.page.is_none_or(|p| p == self.page)
-                && (!matches!(b.id, SPEED | DIRECTION) || animated);
+            let visible = b.page.is_none_or(|p| p == self.page);
             let enabled = self.enabled(b.id, self.session.busy);
             // SAFETY: UI-owned child handles on their owning thread.
             unsafe {
@@ -1000,6 +974,11 @@ impl App {
             PRESET_BOOST => ready && c.is_some_and(|c| c.boost),
             APPLY_CUSTOM => ready && self.settings.profiles.iter().any(|p| p.name == "Custom"),
             GPU_TEMP | STARTUP => !busy,
+            // Lighting options stay in place and are disabled when the effect ignores them,
+            // so the page layout never jumps.
+            SPEED | DIRECTION => self.animated(),
+            COLOR => self.lighting.effect != Effect::Off,
+            SWATCH..=225 => self.lighting.effect != Effect::Off,
             _ => true,
         }
     }
@@ -1009,9 +988,6 @@ impl App {
             Effect::Breathing | Effect::Rainbow | Effect::Wave
         )
     }
-    fn light_bar_y(&self) -> i32 {
-        if self.animated() { 430 } else { 358 }
-    }
     fn effect_index(&self) -> usize {
         match self.lighting.effect {
             Effect::Off => 0,
@@ -1020,6 +996,18 @@ impl App {
             Effect::Rainbow => 3,
             Effect::Wave => 4,
             Effect::Reactive => 0,
+        }
+    }
+    /// Submit a request started by clicking control `id`, drawing that control as pending.
+    fn submit_pending(&mut self, id: u16, job: Job) {
+        if self.session.busy {
+            return;
+        }
+        self.pending = Some(id);
+        self.submit(job);
+        if !self.session.busy {
+            self.pending = None;
+            self.refresh_controls();
         }
     }
     fn submit(&mut self, job: Job) {
@@ -1077,6 +1065,10 @@ impl App {
         while let Ok(r) = self.rx.try_recv() {
             if r.message.starts_with("Synthetic worker") {
                 self.test_completed = true;
+            }
+            if !r.passive {
+                // The clicked request finished; verified state below replaces the pending look.
+                self.pending = None;
             }
             let old_caps = self.session.capabilities.clone();
             let old_allowed = self.session.allowed;
@@ -1215,44 +1207,37 @@ impl App {
             self.refresh_controls();
         }
         let s = mcc::platform::dashboard_snapshot();
-        let cpu = s
-            .system_cpu_times
-            .value
-            .and_then(|now| {
-                let v = self.previous_cpu.and_then(|prev| mcc::cpu_usage(prev, now));
-                self.previous_cpu = Some(now);
-                v
-            })
-            .map(|v| format!("{v:.0}%"))
-            .unwrap_or("—".into());
-        let memory = s
-            .memory_used_percent
-            .value
-            .map(|v| format!("{v}%"))
-            .unwrap_or("—".into());
-        let battery = s
-            .battery_percent
-            .value
-            .map(|v| {
-                format!(
-                    "{v}% {}",
-                    if s.ac_connected.value == Some(true) {
-                        "· AC"
-                    } else {
-                        ""
-                    }
-                )
-            })
-            .unwrap_or("—".into());
+        let cpu = s.system_cpu_times.value.and_then(|now| {
+            let v = self.previous_cpu.and_then(|prev| mcc::cpu_usage(prev, now));
+            self.previous_cpu = Some(now);
+            v
+        });
+        let cpu = cpu.map(|v| v.round().clamp(0., 100.) as u8);
+        let memory = s.memory_used_percent.value.map(|v| v.min(100) as u8);
+        let battery = s.battery_percent.value.map(|v| v.min(100));
+        let percent = |v: Option<u8>| v.map_or("—".into(), |v| format!("{v}%"));
+        let stats = [percent(cpu), percent(memory), percent(battery)];
+        let levels = [cpu, memory, battery];
+        let battery_note = match (battery, s.ac_connected.value) {
+            (Some(_), Some(true)) => "Plugged in",
+            (Some(_), Some(false)) => "On battery",
+            _ => "",
+        }
+        .to_string();
         let clock = s
             .cpu_clock_mhz
             .value
-            .map(|v| format!("{:.2} GHz · OS", v as f64 / 1000.))
-            .unwrap_or("—".into());
-        let stats = [cpu, memory, battery];
-        if self.stats != stats || self.cpu_clock != clock {
+            .map(|v| format!("{:.2} GHz", v as f64 / 1000.))
+            .unwrap_or_default();
+        if self.stats != stats
+            || self.cpu_clock != clock
+            || self.levels != levels
+            || self.battery_note != battery_note
+        {
             self.stats = stats;
             self.cpu_clock = clock;
+            self.levels = levels;
+            self.battery_note = battery_note;
             let r = self.rect(32, STATS_Y, 656, STATS_H);
             // SAFETY: Stack RECT copied by Windows; repaint only changed displayed values.
             unsafe {
@@ -1353,30 +1338,39 @@ impl App {
             CONNECT => self.connect(),
             AUTO | BOOST => {
                 if self.session.ready() {
-                    self.submit(Job::Fan(if id == BOOST {
-                        FanMode::Boost
-                    } else {
-                        FanMode::Auto
-                    }));
+                    self.submit_pending(
+                        id,
+                        Job::Fan(if id == BOOST {
+                            FanMode::Boost
+                        } else {
+                            FanMode::Auto
+                        }),
+                    );
                 }
             }
             QUIET | BALANCED | PERFORMANCE => {
                 if !self.session.busy {
-                    self.submit(Job::Power(match id {
-                        QUIET => PowerPlan::PowerSaver,
-                        PERFORMANCE => PowerPlan::HighPerformance,
-                        _ => PowerPlan::Balanced,
-                    }));
+                    self.submit_pending(
+                        id,
+                        Job::Power(match id {
+                            QUIET => PowerPlan::PowerSaver,
+                            PERFORMANCE => PowerPlan::HighPerformance,
+                            _ => PowerPlan::Balanced,
+                        }),
+                    );
                 }
             }
             REGULAR | PRESET_DAILY | PRESET_HIGH | PRESET_BOOST => {
                 if self.session.ready() {
-                    self.submit(Job::Preset(match id {
-                        REGULAR => Preset::Office,
-                        PRESET_HIGH => Preset::High,
-                        PRESET_BOOST => Preset::Turbo,
-                        _ => Preset::Balanced,
-                    }));
+                    self.submit_pending(
+                        id,
+                        Job::Preset(match id {
+                            REGULAR => Preset::Office,
+                            PRESET_HIGH => Preset::High,
+                            PRESET_BOOST => Preset::Turbo,
+                            _ => Preset::Balanced,
+                        }),
+                    );
                 }
             }
             SAVE_CUSTOM => {
@@ -1456,7 +1450,7 @@ impl App {
                     _ => Switch::LightBar,
                 };
                 if let Some(on) = self.session.toggle_target(s) {
-                    self.submit(Job::Switch(s, on));
+                    self.submit_pending(id, Job::Switch(s, on));
                 }
             }
             APPLY_LIGHT => {
@@ -1605,11 +1599,11 @@ impl App {
             _ => {}
         }
     }
+    /// The warm hardware agent lives while the window is open and controls are enabled, on any
+    /// page. Hidden in the tray, it is stopped and each rare request uses a fresh helper.
+    /// Fan polling itself still runs only on the visible Cooling page (see `poll`).
     fn sync_observer_scope(&self) {
-        let enabled = self.visible
-            && self.page == Page::Cooling
-            && self.monitor.enabled
-            && self.session.allowed;
+        let enabled = self.visible && self.monitor.enabled && self.session.allowed;
         if self.observation_scope.swap(enabled, Ordering::Relaxed) && !enabled {
             let _ = self.tx.try_send(Job::StopObserver);
         }
@@ -1630,7 +1624,7 @@ impl App {
             self.dashboard();
         } else {
             self.gpu = None;
-            caption(self.handle(GPU_TEMP), "Read GPU");
+            caption(self.handle(GPU_TEMP), "Read");
             // SAFETY: Suspend OS and firmware observations in tray and when minimized.
             unsafe {
                 KillTimer(self.hwnd, 1);
@@ -1755,15 +1749,14 @@ impl App {
                 self.label(dc, "Windows power", 52, 342, 616, 24, 1, INK);
             }
             Page::Lighting => {
-                let bar = self.light_bar_y();
-                self.round(dc, self.rect(32, 148, 656, bar - 160), WHITE, BORDER, 16);
+                self.round(dc, self.rect(32, 148, 656, 270), WHITE, BORDER, 16);
                 self.label(dc, "Keyboard", 52, 162, 120, 30, 1, INK);
                 self.label(
                     dc,
                     if self.last_lighting_sent.as_ref() == Some(&self.lighting) {
-                        "Sent"
+                        "Applied"
                     } else {
-                        "Not sent yet"
+                        "Not applied yet"
                     },
                     140,
                     166,
@@ -1772,16 +1765,43 @@ impl App {
                     3,
                     MUTED,
                 );
+                let off = self.lighting.effect == Effect::Off;
+                let animated = self.animated();
                 self.label(dc, "Effect", 52, 202, 280, 22, 3, MUTED);
                 self.label(dc, "Brightness", 364, 202, 280, 22, 3, MUTED);
-                self.label(dc, "Color", 52, 273, 280, 22, 3, MUTED);
-                if self.animated() {
-                    self.label(dc, "Animation speed", 52, 346, 280, 22, 3, MUTED);
-                    self.label(dc, "Direction", 364, 346, 280, 22, 3, MUTED);
-                }
-                self.round(dc, self.rect(32, bar, 656, 56), WHITE, BORDER, 16);
-                self.label(dc, "Light bar", 52, bar + 8, 380, 24, 1, INK);
-                self.label(dc, "Off at sign-in", 52, bar + 32, 460, 18, 3, MUTED);
+                self.label(
+                    dc,
+                    "Color",
+                    52,
+                    273,
+                    280,
+                    22,
+                    3,
+                    if off { BORDER_HOT } else { MUTED },
+                );
+                let (speed, direction) = if animated {
+                    ("Animation speed", "Direction")
+                } else {
+                    (
+                        "Animation speed · animated effects",
+                        "Direction · animated effects",
+                    )
+                };
+                let tone = if animated { MUTED } else { BORDER_HOT };
+                self.label(dc, speed, 52, 346, 300, 22, 3, tone);
+                self.label(dc, direction, 364, 346, 300, 22, 3, tone);
+                self.round(dc, self.rect(32, 430, 656, 56), WHITE, BORDER, 16);
+                self.label(dc, "Light bar", 52, 438, 380, 24, 1, INK);
+                self.label(
+                    dc,
+                    "Turned off at every sign-in",
+                    52,
+                    462,
+                    460,
+                    18,
+                    3,
+                    MUTED,
+                );
             }
             Page::Settings => {
                 self.round(dc, self.rect(32, 148, 656, 140), WHITE, BORDER, 16);
@@ -1825,21 +1845,66 @@ impl App {
             .as_ref()
             .filter(|(_, time)| time.elapsed() < Duration::from_secs(30))
             .map(|(s, _)| s);
-        let gpu_note = match sample.map(|s| (s.temperature_c, s.fan_rpm)) {
-            Some((Some(t), Some(f))) => format!("{t} °C · {f} RPM"),
-            Some((Some(t), None)) => format!("{t} °C"),
+        let gpu_temp = sample.and_then(|s| s.temperature_c);
+        let gpu_value = gpu_temp.map_or("—".into(), |t| format!("{t} °C"));
+        let gpu_note = match sample.map(|s| (s.clock_mhz, s.fan_rpm)) {
+            Some((Some(c), _)) => format!("{c} MHz"),
             Some((None, Some(f))) => format!("{f} RPM"),
-            Some((None, None)) => "No sensors".into(),
-            None => "On demand".into(),
+            Some(_) => String::new(),
+            None => "Read on demand".into(),
         };
-        // The GPU value is the GPU_TEMP button itself, so the sample is read only on request.
-        let values = [self.stats[0].as_str(), &self.stats[1], &self.stats[2], ""];
-        let notes = [self.cpu_clock.as_str(), "", "", &gpu_note];
-        for (i, name) in ["CPU", "Memory", "Battery", "GPU"].iter().enumerate() {
+        // Each tile: name, large value with a short note, and a level bar.
+        let tiles = [
+            (
+                "CPU",
+                self.stats[0].as_str(),
+                self.cpu_clock.as_str(),
+                self.levels[0],
+                90,
+            ),
+            ("Memory", &self.stats[1], "", self.levels[1], 90),
+            (
+                "Battery",
+                &self.stats[2],
+                &self.battery_note,
+                self.levels[2],
+                0,
+            ),
+            (
+                "GPU",
+                &gpu_value,
+                &gpu_note,
+                gpu_temp.map(|t| t.clamp(0, 100) as u8),
+                85,
+            ),
+        ];
+        for (i, (name, value, note, level, warn)) in tiles.into_iter().enumerate() {
             let x = 48 + i as i32 * 164;
-            self.label(dc, values[i], x, STATS_Y + 10, 150, 26, 1, INK);
-            self.label(dc, notes[i], x, STATS_Y + 37, 150, 20, 3, MUTED);
-            self.label(dc, name, x, STATS_Y + 62, 150, 20, 3, MUTED);
+            self.label(dc, name, x, STATS_Y + 12, 100, 20, 3, MUTED);
+            self.label(dc, value, x, STATS_Y + 32, 132, 28, 4, INK);
+            self.draw_text(
+                dc,
+                note,
+                self.rect(x, STATS_Y + 38, 132, 20),
+                3,
+                MUTED,
+                DT_RIGHT | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            let track = self.rect(x, STATS_Y + 68, 132, 5);
+            self.round(dc, track, TRACK, TRACK, 6);
+            if let Some(level) = level.filter(|l| *l > 0) {
+                let fill_color = if name == "Battery" {
+                    if level <= 20 { ERROR } else { GREEN }
+                } else if level >= warn {
+                    AMBER
+                } else {
+                    GREEN
+                };
+                let mut fill = track;
+                fill.right = fill.left
+                    + ((fill.right - fill.left) * i32::from(level.min(100)) / 100).max(self.px(5));
+                self.round(dc, fill, fill_color, fill_color, 6);
+            }
         }
     }
     fn draw_button(&self, d: &DRAWITEMSTRUCT) {
@@ -1897,10 +1962,29 @@ impl App {
             }
             _ => false,
         };
+        // Show the clicked choice immediately while the firmware confirms it. The next verified
+        // status replaces this, and a failed request reverts it.
+        let selected = match self.pending {
+            Some(p) if p == id && matches!(id, KEY | USB | BAR) => !selected,
+            Some(p) => {
+                const GROUPS: [&[u16]; 3] = [
+                    &[AUTO, BOOST],
+                    &[QUIET, BALANCED, PERFORMANCE],
+                    &[REGULAR, PRESET_DAILY, PRESET_HIGH, PRESET_BOOST],
+                ];
+                match GROUPS.iter().find(|g| g.contains(&p)) {
+                    Some(group) if group.contains(&id) => id == p,
+                    _ => selected,
+                }
+            }
+            None => selected,
+        };
         // SAFETY: Windows supplies valid DC/RECT; save and restore isolate drawing state.
         let saved = unsafe { SaveDC(d.hDC) };
         let nav = matches!(id, COOLING | LIGHTING | SETTINGS);
-        let primary = id == APPLY_LIGHT || id == CONNECT && !self.session.allowed;
+        // Apply is the primary action only while the keyboard has unsent changes.
+        let primary = id == APPLY_LIGHT && self.last_lighting_sent.as_ref() != Some(&self.lighting)
+            || id == CONNECT && !self.session.allowed;
         let (fill, edge) = if nav {
             if selected {
                 (WHITE, BORDER)
@@ -1954,6 +2038,43 @@ impl App {
             FillRect(d.hDC, &r, brush);
             DeleteObject(brush);
         }
+        if matches!(id, KEY | USB | BAR | STARTUP) {
+            // On/off settings are drawn as a switch; the caption remains for accessibility.
+            let (w, h) = (self.px(44), self.px(24));
+            let mut track = RECT {
+                left: r.right - w,
+                top: (r.top + r.bottom - h) / 2,
+                right: r.right,
+                bottom: (r.top + r.bottom + h) / 2,
+            };
+            let color = if disabled {
+                TRACK
+            } else if selected {
+                if hot || pressed { GREEN_HOT } else { GREEN }
+            } else if hot || pressed {
+                SWITCH_OFF_HOT
+            } else {
+                SWITCH_OFF
+            };
+            self.round(d.hDC, track, color, color, 24);
+            let inset = self.px(3);
+            let knob = h - 2 * inset;
+            track.top += inset;
+            track.bottom = track.top + knob;
+            if selected {
+                track.right -= inset;
+                track.left = track.right - knob;
+            } else {
+                track.left += inset;
+                track.right = track.left + knob;
+            }
+            self.round(d.hDC, track, WHITE, WHITE, 24);
+            // SAFETY: Restore DC state saved on entry.
+            unsafe {
+                RestoreDC(d.hDC, saved);
+            }
+            return;
+        }
         self.round(d.hDC, r, fill, edge, if nav { 10 } else { 12 });
         let mut buffer = [0u16; 160];
         // SAFETY: Owned child handle and correctly sized writable character buffer.
@@ -1981,7 +2102,13 @@ impl App {
             self.round(
                 d.hDC,
                 r,
-                rgb(c[0], c[1], c[2]),
+                if disabled {
+                    // Faded toward white while the effect ignores color.
+                    let f = |v: u8| ((u16::from(v) + 2 * 255) / 3) as u8;
+                    rgb(f(c[0]), f(c[1]), f(c[2]))
+                } else {
+                    rgb(c[0], c[1], c[2])
+                },
                 if active { GREEN } else { BORDER },
                 10,
             );
@@ -2025,7 +2152,13 @@ impl App {
                 d.hDC,
                 &s,
                 r,
-                if nav || primary { 1 } else { 0 },
+                if nav || primary {
+                    1
+                } else if id == GPU_TEMP {
+                    3
+                } else {
+                    0
+                },
                 color,
                 (if choice { DT_LEFT } else { DT_CENTER }) | DT_VCENTER | DT_SINGLELINE,
             );
@@ -2319,7 +2452,7 @@ pub fn run() {
     // SAFETY: Live window, DPI query, font creation and resize affect only this UI.
     let (dpi, fonts) = unsafe {
         let dpi = GetDpiForWindow(hwnd).max(96) as i32;
-        let fonts = [(16, 400), (16, 600), (25, 600), (13, 400)].map(|(n, w)| {
+        let fonts = [(16, 400), (16, 600), (25, 600), (13, 400), (21, 600)].map(|(n, w)| {
             CreateFontW(
                 -n * dpi / 96,
                 0,
@@ -2373,10 +2506,10 @@ pub fn run() {
             caps.fan_mode_raw = 64;
         }
         let mut fail = fail_demo;
-        let mut observer = None;
+        let hardware = RefCell::new(Hardware(None));
         while let Ok(job) = jobs.recv() {
             if !worker_scope.load(Ordering::Relaxed) || matches!(job, Job::StopObserver) {
-                observer = None;
+                hardware.borrow_mut().0 = None;
             }
             if matches!(job, Job::StopObserver) {
                 continue;
@@ -2391,14 +2524,14 @@ pub fn run() {
             } else if demo {
                 demo_worker(job, &mut caps, &mut fail)
             } else {
-                worker(job, &mut observer)
+                worker(job, &hardware)
             };
             if !worker_scope.load(Ordering::Relaxed)
                 || r.stop_monitor
                 || r.status_failed
                 || r.observation.as_ref().is_some_and(|o| !o.writes_allowed)
             {
-                observer = None;
+                hardware.borrow_mut().0 = None;
             }
             if result_tx.send(r).is_err() {
                 break;
@@ -2462,7 +2595,10 @@ pub fn run() {
         previous_cpu: None,
         stats: Default::default(),
         cpu_clock: String::new(),
+        levels: [None; 3],
+        battery_note: String::new(),
         gpu: None,
+        pending: None,
         tray: NOTIFYICONDATAW::default(),
         tray_tip: RefCell::new(String::new()),
         benchmark: mode.and_then(|(seconds, path, hidden, self_test)| {
@@ -2511,7 +2647,7 @@ pub fn run() {
     a.button("Apply custom", APPLY_CUSTOM, c, (32, 430, 208, 34));
     a.button("Save as custom", SAVE_CUSTOM, c, (256, 430, 208, 34));
     a.button("Fan support", CUSTOM, c, (480, 430, 208, 34));
-    a.button("Apply keyboard", APPLY_LIGHT, l, (496, 160, 172, 34));
+    a.button("Apply", APPLY_LIGHT, l, (548, 161, 120, 32));
     a.button("Solid", EFFECT, l, (52, 227, 296, 34));
     a.button("High", BRIGHTNESS, l, (364, 227, 304, 34));
     for (i, name) in ["Blue", "Purple", "Green", "Red", "Amber", "White"]
@@ -2528,14 +2664,14 @@ pub fn run() {
     a.button("Custom color…", COLOR, l, (364, 298, 304, 36));
     a.button("Medium", SPEED, l, (52, 371, 296, 34));
     a.button("Left → right", DIRECTION, l, (364, 371, 304, 34));
-    a.button("Unavailable", BAR, l, (548, 442, 120, 32));
-    a.button("Unavailable", KEY, s, (548, 166, 120, 34));
-    a.button("Unavailable", USB, s, (548, 231, 120, 34));
-    a.button("Off", STARTUP, s, (548, 326, 120, 34));
+    a.button("Unavailable", BAR, l, (616, 442, 52, 32));
+    a.button("Unavailable", KEY, s, (616, 167, 52, 32));
+    a.button("Unavailable", USB, s, (616, 232, 52, 32));
+    a.button("Off", STARTUP, s, (616, 327, 52, 32));
     a.button("Turn screen off", SCREEN_OFF, s, (32, 429, 208, 34));
     a.button("Graphics settings", GPU, s, (256, 429, 208, 34));
     a.button("Use original controller", RESTORE, s, (480, 429, 208, 34));
-    a.button("Read GPU", GPU_TEMP, None, (540, STATS_Y + 8, 132, 30));
+    a.button("Read", GPU_TEMP, None, (612, STATS_Y + 8, 60, 26));
     a.button("Details", DETAILS, None, (596, FOOTER_Y, 92, 32));
     if demo {
         a.session.complete(Some((demo_caps(), true)), false);
@@ -2548,7 +2684,10 @@ pub fn run() {
     a.dashboard();
     if let Some(path) = preview {
         if std::fs::create_dir_all(&path).is_ok() {
-            a.stats = ["4%".into(), "40%".into(), "84% · AC".into()];
+            a.stats = ["4%".into(), "40%".into(), "84%".into()];
+            a.levels = [Some(4), Some(40), Some(84)];
+            a.battery_note = "Plugged in".into();
+            a.cpu_clock = "2.20 GHz".into();
             a.startup = Some(mcc::startup::Status {
                 enabled: true,
                 managed: true,
@@ -2809,7 +2948,8 @@ mod tests {
     }
     #[test]
     fn passive_full_recovery_reads_once_and_failed_narrow_poll_discards_state() {
-        let r = worker_with(Job::ReconnectPoll, operation, || Ok(ready()));
+        let hw = RefCell::new(Hardware(None));
+        let r = worker_with(Job::ReconnectPoll, |j| operation(j, &hw), || Ok(ready()));
         assert!(r.passive && !r.error);
         assert!(r.status.is_some());
         let r = worker_with(

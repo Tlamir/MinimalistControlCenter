@@ -1,4 +1,6 @@
 //! Native control center. Diagnostics are read-only; controls use an explicit typed backend.
+#[cfg(windows)]
+pub mod agent;
 pub mod cli;
 pub mod control;
 #[cfg(windows)]
@@ -13,8 +15,6 @@ pub mod hardware;
 pub mod instance;
 pub mod lighting;
 pub mod monitor;
-#[cfg(windows)]
-pub mod observer;
 #[cfg(windows)]
 mod oem;
 pub mod platform;
